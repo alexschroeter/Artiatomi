@@ -16,7 +16,7 @@
 #CFLAGS= -Wall -std=c++11 -Wno-unknown-pragmas
 #else
 CC=/opt/rocm/bin/hipcc #-O3 -cl-no-signed-zeros #--ftz=true #-std=c++11 -ccbin=gcc -arch=sm_75 --machine 64 --use_fast_math #-DHIP_FAST_MATH
-#CFLAGS+= -Wall -std=c++11 -Wno-unknown-pragmas
+CFLAGS+=--std=c++11 # -Wall -std=c++11 -Wno-unknown-pragmas
 #MPI_COMPILE_FLAGS = $(shell mpic++ --showme:compile)
 #MPI_LINK_FLAGS = $(shell mpic++ --showme:link)
 #endif
@@ -29,7 +29,7 @@ CFLAGS += $(shell /opt/rocm/bin/hipconfig --cpp_config)
 ##############################################################################
 # We include rocm, cuda and rocfft
 ##############################################################################
-INCLUDES=-I/opt/rocm/rocfft/include -I/usr/include/mpich -I/usr/local/cuda/include
+INCLUDES=-I/opt/rocm/rocfft/include -I/usr/include/mpi -I/usr/local/cuda/include
 
 ##############################################################################
 # Linking library directories
@@ -39,7 +39,7 @@ LIBDIRS=-L/usr/lib/x86_64-linux-gnu -L/opt/rocm/lib -L/usr/local/cuda/lib64/
 ##############################################################################
 # Linking libraries
 ##############################################################################
-LIBS=-lmpich -lcuda -lcudart -lcufft
+LIBS=-lmpi -lcuda -lcudart -lcufft
 
 ##############################################################################
 # These are all the common sources

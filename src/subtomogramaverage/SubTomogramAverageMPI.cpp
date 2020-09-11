@@ -125,7 +125,7 @@
 using namespace std;
 using namespace Hip;
 
-//#define round(x) (x >= 0 ? (int)(x + 0.5) : (int)(x - 0.5)) // TODO deprecated
+#define round(x) (x >= 0 ? (int)(x + 0.5) : (int)(x - 0.5)) // TODO deprecated
 
 /* AS
  * In the original code most kernels had its own class which added no additional
@@ -951,7 +951,9 @@ int main(int argc, char *argv[]) {
         }
       completed_particle++;
       now = clock();
-      printETA(completed_particle, partCount*(aConfig.EndIteration-aConfig.StartIteration), now-start);
+      if (mpi_part == 0){
+	 printETA(completed_particle, partCount*(aConfig.EndIteration-aConfig.StartIteration), now-start);
+	}
       } else {
 #if VERBOSE >= 2
         printf("\t| Reference is a Single Referencet.\n");
@@ -1162,7 +1164,9 @@ int main(int argc, char *argv[]) {
 #endif
         completed_particle++;
         now = clock();
-        printETA(completed_particle, partCount*(aConfig.EndIteration-aConfig.StartIteration), now-start);
+        if (mpi_part == 0){
+		printETA(completed_particle, partCount*(aConfig.EndIteration-aConfig.StartIteration), now-start);
+	}
         }
 
       }
