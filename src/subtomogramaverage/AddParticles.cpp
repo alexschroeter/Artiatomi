@@ -20,32 +20,209 @@
 //  
 ////////////////////////////////////////////////////////////////////////
 
+/* AS Verbose Level
+ * Setting the compiler directive to VERBOSE X will set the VERBOSE level to:
+ * 0 = NO Output
+ * 5 = Basic Output
+ * 10 = Verbose Output
+ * */
+#ifndef VERBOSE
+#define VERBOSE 1
+#endif
+
+/* AS
+ * Setting the compiler directive to TIME X will add Timings to specific sections
+ * relevant for performance measurement: */
+#ifndef TIME
+#define TIME 0
+#endif
 
 #define USE_MPI
 #ifdef USE_MPI
 #include <mpi.h>
 #endif
 
-#include "default.h"
 #include <algorithm>
-#include "io/MotiveListe.h"
-#include "config/Config.h"
-#include "io/EMFile.h"
-#include "CudaReducer.h"
-#include "cuda/CudaContext.h"
-#include "cuda/CudaVariables.h"
-#include "cuda/CudaKernel.h"
-#include "AvgProcess.h"
-#include <time.h>
+#include <argp.h>
 #include <iomanip>
-#include <algorithm>
 #include <map>
+#include <argp.h>
+
+//#include "default.h"
+#include "../config/Config.h"
+#include "../io/EMFile.h"
+#include "../io/MotiveListe.h"
+#include "../HelperFunctions.h"
+#include "../hip/HipBasicKernel.h"
+#include "../hip/HipContext.h"
+#include "../hip/HipKernel.h"
+#include "../hip/HipReducer.h"
+#include "../hip/HipVariables.h"
+#include "Kernels.h"
+
+/* AS HIP FFT Library is not very stable (28.2.2020) so we need to switch
+ * between cufft and rocfft depending on compile platform
+ * 
+ * https://github.com/ROCmSoftwarePlatform/rocFFT/issues/276
+ */
+#if defined(__HIP_PLATFORM_NVCC__) && !defined(__HIP_PLATFORM_HCC__)
+#include <cufft.h>
+#endif
+#if !defined(__HIP_PLATFORM_NVCC__) && defined(__HIP_PLATFORM_HCC__)
+#include <hipfft.h>
+#endif
+
+/* AS 
+ * At compile time we replace the kernels depending on which platform we
+ * are using. *.nvcc.h files are created using compileHIPKernelsAMD.sh and
+ * compileHIPKernelsNVIDIA.sh scripts
+ */
+#if defined(__HIP_PLATFORM_NVCC__) && !defined(__HIP_PLATFORM_HCC__)
+#include "../hip_kernels/build/basicKernels.nvcc.h"
+#include "../hip_kernels/build/kernel.nvcc.h"
+#endif
+#if !defined(__HIP_PLATFORM_NVCC__) && defined(__HIP_PLATFORM_HCC__)
+#include "../hip_kernels/build/basicKernels.hcc.h"
+#include "../hip_kernels/build/kernel.hcc.h"
+#endif
+
+#include "AvgProcess.h"
+
+#if defined(__HIP_PLATFORM_NVCC__) && !defined(__HIP_PLATFORM_HCC__)
+#define grid dim3(size / 32, size, size)
+#define block dim3(32, 1, 1)
+#define grid_RC dim3((size / 2 + 1) / (size / 2 + 1), size, size)
+#define block_RC dim3(size / 2 + 1, 1, 1)
+#endif
+
+#if defined(__HIP_PLATFORM_HCC__) && !defined(__HIP_PLATFORM_NVCC__)
+// #define grid dim3(1, 1, size)
+// #define block dim3(64, 64, 1)
+// #define grid_RC dim3(size/2+1, 1, 1)
+// #define block_RC dim3(1, 64, 64)
+
+// #define grid dim3(size/64, size, size)
+// #define block dim3(64, 1, 1)
+// #define grid_RC dim3(size/2+1, 1, size)
+// #define block_RC dim3(1, 64, 1)
+
+#define grid dim3(size / 32, size / 16, size)
+#define block dim3(32, 16, 1)
+#define grid_RC dim3(size / 2 + 1, size / 32, size /16)
+#define block_RC dim3(1, 32, 16)
+#endif
 
 using namespace std;
-using namespace Cuda;
-
+using namespace Hip;
 
 #define round(x) (x >= 0 ? (int)(x + 0.5) : (int)(x - 0.5))
+
+
+/* AS
+ * In the original code most kernels had its own class which added no additional
+ * functionality. This code has also been portet to hip but for ease of
+ * developement in all new versions of the code we removed the classes and now 
+ * simply inline the kernels. The old variant we refer to as a binary kernels 
+ * since they are stored as binary. It's quite possible that this functionality 
+ * wasn't available at the time of the original code but now they seem 
+ * unneccessary.
+ * 
+ * To differentiate between Kernels in the basickernel and kernel file we call
+ * kernels name those kernels needed in this file with a trailing underscore.
+ * This should enable us to reduce the size in the future if we decide to remove
+ * all the different kernel classes seen in the binary kernel version.
+ */
+extern "C" __global__ void mul(int size, float in, float2 *outVol) {
+  const unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int z = blockIdx.z * blockDim.z + threadIdx.z;
+
+  float2 temp = outVol[z * size * size + y * size + x];
+  temp.x *= in;
+  temp.y *= in;
+  outVol[z * size * size + y * size + x] = temp;
+}
+
+extern "C" __global__ void mulVol(int size, float *inVol, float2 *outVol) {
+  const unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int z = blockIdx.z * blockDim.z + threadIdx.z;
+
+  float2 temp = outVol[z * size * size + y * size + x];
+  temp.x *= inVol[z * size * size + y * size + x];
+  temp.y *= inVol[z * size * size + y * size + x];
+  outVol[z * size * size + y * size + x] = temp;
+}
+
+extern "C" __global__ void makeCplxWithSub(int size, float *inVol,
+                                           float2 *outVol, float val) {
+  const unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int z = blockIdx.z * blockDim.z + threadIdx.z;
+
+  float2 temp = make_float2(inVol[z * size * size + y * size + x] - val, 0);
+  outVol[z * size * size + y * size + x] = temp;
+}
+
+extern "C" __global__ void makeReal(int size, float2 *inVol, float *outVol) {
+  const unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int z = blockIdx.z * blockDim.z + threadIdx.z;
+
+  float2 temp = inVol[z * size * size + y * size + x];
+  outVol[z * size * size + y * size + x] = temp.x;
+}
+
+extern "C" __global__ void wedgeNorm(int size, float *wedge, float2 *part,
+                                     float *maxVal, int newMethod) {
+  const unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int z = blockIdx.z * blockDim.z + threadIdx.z;
+
+  float val = wedge[z * size * size + y * size + x];
+
+  if (newMethod) {
+    if (val <= 0)
+      val = 0;
+    else
+      val = 1.0f / val;
+  } else {
+    if (val < 0.1f * maxVal[0])
+      val = 1.0f / (0.1f * maxVal[0]);
+    else
+      val = 1.0f / val;
+  }
+  float2 p = part[z * size * size + y * size + x];
+  p.x *= val;
+  p.y *= val;
+  part[z * size * size + y * size + x] = p;
+}
+
+extern "C" __global__ void fftshift2(int size, float2 *volIn, float2 *volOut) {
+  const int x = blockIdx.x * blockDim.x + threadIdx.x;
+  const int y = blockIdx.y * blockDim.y + threadIdx.y;
+  const int z = blockIdx.z * blockDim.z + threadIdx.z;
+
+  int i = (x + size / 2) % size;
+  int j = (y + size / 2) % size;
+  int k = (z + size / 2) % size;
+  // int i, j, k;
+  // x <= size/2 ? i = x+size/2 : i= x-size/2;
+  // y <= size/2 ? j = y+size/2 : j= y-size/2;
+  // z <= size/2 ? k = z+size/2 : k= z-size/2;
+
+  float2 temp = volIn[k * size * size + j * size + i];
+  volOut[z * size * size + y * size + x] = temp;
+}
+
+extern "C" __global__ void add(int size, float *inVol, float *outVol) {
+  const unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int z = blockIdx.z * blockDim.z + threadIdx.z;
+
+  outVol[z * size * size + y * size + x] +=
+      inVol[z * size * size + y * size + x];
+}
 
 /*
 void computeRotMat(float phi, float psi, float theta, float rotMat[3][3])
@@ -250,6 +427,31 @@ bool checkIfClassIsToAverage(vector<int>& classes, int aClass)
 	return false;
 }
 
+KernelModuls::KernelModuls(Hip::HipContext *aHipCtx)
+    : compilerOutput(false), infoOutput(false) {
+  modbasicKernels =
+      aHipCtx->LoadModulePTX(KernelbasicKernels, 0, infoOutput, compilerOutput);
+  modkernel =
+      aHipCtx->LoadModulePTX(Kernelkernel, 0, infoOutput, compilerOutput);
+}
+
+
+void help() {
+  cout << endl;
+  // cout << "Usage: " << argv[0] << endl;
+  cout << "    The following optional options override the configuration file:"
+       << endl;
+  cout << "    Options: " << endl;
+  cout << "    -u FILENAME:   Use a user defined configuration file." << endl;
+  cout << "    -h:            Show this text." << endl;
+
+  cout << ("\nPress <Enter> to exit...");
+
+  char c = cin.get();
+  exit(-1);
+}
+
+
 int main(int argc, char* argv[])
 {
 	int mpi_part = 0;
@@ -381,10 +583,58 @@ int main(int argc, char* argv[])
 
 	MPI_Barrier(MPI_COMM_WORLD);
 #endif
+	int c;
 
-	Configuration::Config aConfig = Configuration::Config::GetConfig("average.cfg", argc, argv, mpi_part, NULL);
+	/* Flag set by ‘--verbose’. */
+	static int verbose_flag = 0;
+	static int c2c_flag = 1;
+	string config_path = "average.cfg";
 
-	CudaContext* ctx = CudaContext::CreateInstance(aConfig.CudaDeviceIDs[mpi_part], CU_CTX_SCHED_SPIN);
+	while (true) {
+		static struct option long_options[] = {
+			/* These options set a flag. */
+			{"verbose", no_argument, &verbose_flag, 1},
+			{"brief", no_argument, &verbose_flag, 0},
+			/* These options don’t set a flag. We distinguish them by their indices.
+			*/
+			{"config", required_argument, nullptr, 'u'},
+			{"C2C", no_argument, &c2c_flag, '1'},
+			{"R2C", no_argument, &c2c_flag, '0'},
+			{"time", required_argument, nullptr, 't'},
+			{nullptr, no_argument, nullptr, 0}};
+		/* getopt_long stores the option index here. */
+		int option_index = 0;
+
+		c = getopt_long(argc, argv, "u:t:", long_options, &option_index);
+
+		/* Detect the end of the options. */
+		if (c == -1)
+		break;
+
+		switch (c) {
+		case 'u':
+		config_path = optarg;
+		printf("Configuration file is located at %s.\n", optarg);
+		break;
+
+		case 't':
+		printf("The time measurement level has been set to `%i'\n", atoi(optarg));
+		break;
+
+		case '?':
+		/* getopt_long already printed an error message. */
+		break;
+
+		default:
+		help();
+		}
+	}
+	//Configuration::Config aConfig = Configuration::Config::GetConfig("average.cfg", argc, argv, mpi_part, NULL);
+	Configuration::Config aConfig = Configuration::Config::GetConfig(config_path, argc, argv, mpi_part, NULL);
+	//CudaContext* ctx = CudaContext::CreateInstance(aConfig.CudaDeviceIDs[mpi_part], CU_CTX_SCHED_SPIN);
+	Hip::HipContext *ctx = Hip::HipContext::CreateInstance(aConfig.CudaDeviceIDs[mpi_part], hipDeviceScheduleSpin);
+	
+	KernelModuls modules = KernelModuls(ctx);
 
 	int iter = aConfig.StartIteration;
 	{
@@ -470,7 +720,16 @@ int main(int argc, char* argv[])
 		if (mpi_part == 0)
 			cout << "maskcc OK" << endl;*/
 
-		
+		EMFile *filter = NULL;
+		if (aConfig.UseFilterVolume) {
+			filter = new EMFile(aConfig.FilterFileName);
+			filter->OpenAndRead();
+			filter->ReadHeaderInfo();
+#if VERBOSE >= 2
+			if (mpi_part == 0)
+				cout << "filter OK" << endl;
+#endif
+		}
 
 		std::cout << "Context OK" << std::endl;
 		int size;
@@ -627,599 +886,1079 @@ int main(int argc, char* argv[])
 
 
 
-		/////////////////////
-		/// Add particles ///
-		/////////////////////
-
-		{
-
-			cufftHandle ffthandle;
-
-			int n[] = { size, size, size };
-			cufftSafeCall(cufftPlanMany(&ffthandle, 3, n, NULL, 0, 0, NULL, 0, 0, CUFFT_C2C, 1));
-
-			CUstream stream = 0;
-			cufftSafeCall(cufftSetStream(ffthandle, stream));
-
-			CudaRot rot(size, stream, ctx, aConfig.LinearInterpolation);
-			CudaRot rotWedge(size, stream, ctx, aConfig.LinearInterpolation);
-			CudaSub sub(size, stream, ctx);
-			CudaMakeCplxWithSub makecplx(size, stream, ctx);
-			CudaBinarize binarize(size, stream, ctx);
-			CudaMul mul(size, stream, ctx);
-			CudaFFT fft(size, stream, ctx);
-			CudaReducer max(size*size*size, stream, ctx);
-			CudaWedgeNorm wedgeNorm(size, stream, ctx);
-
-			CudaDeviceVariable partReal(size*size*size*sizeof(float));
-			CudaDeviceVariable partRot(size*size*size*sizeof(float));
-			CudaDeviceVariable partCplx(size*size*size*sizeof(float2));
-			CudaDeviceVariable wedge_d(size*size*size*sizeof(float));
-			CudaDeviceVariable wedgeSum(size*size*size*sizeof(float));
-			CudaDeviceVariable wedgeSumO(size*size*size*sizeof(float));
-			CudaDeviceVariable wedgeSumE(size*size*size*sizeof(float));
-			CudaDeviceVariable wedgeSumA(size*size*size*sizeof(float));
-			CudaDeviceVariable wedgeSumB(size*size*size*sizeof(float));
-			CudaDeviceVariable tempCplx(size*size*size*sizeof(float2));
-			CudaDeviceVariable temp(size*size*size*sizeof(float));
-			CudaDeviceVariable partSum(size*size*size*sizeof(float));
-			CudaDeviceVariable partSumEven(size*size*size*sizeof(float));
-			CudaDeviceVariable partSumOdd(size*size*size*sizeof(float));
-			CudaDeviceVariable partSumA(size*size*size*sizeof(float));
-			CudaDeviceVariable partSumB(size*size*size*sizeof(float));
-
-
-			int skipped = 0;
-			vector<int> partsPerRef;
-
-			for (size_t ref = 0; ref < aConfig.Reference.size(); ref++)
-			{
-				float currentReference = ref + 1;
-
-				partSum.Memset(0);
-				partSumOdd.Memset(0);
-				partSumEven.Memset(0);
-				partSumA.Memset(0);
-				partSumB.Memset(0);
-
-				wedgeSum.Memset(0);
-				wedgeSumO.Memset(0);
-				wedgeSumE.Memset(0);
-				wedgeSumA.Memset(0);
-				wedgeSumB.Memset(0);
-
-
-
-
-				int sumCount = 0;
-				int motCount = partCount;
-
-				float limit = 0;
-
-				limit = meanCCValue;
-				int oldWedgeIdx = -1;
-
-				for (int i = startParticle; i < endParticle; i++)
-				{
-					motive mot = motl.GetAt(i);
-					stringstream ss;
-
-					ss << aConfig.Path << aConfig.Particles;
-					if (mot.classNo != currentReference && aConfig.Reference.size() > 1)
-					{
-						continue;
-					}
-					if (mot.ccCoeff < limit)
-					{
-						skipped++;
-						continue;
-					}
-
-					if (oldWedgeIdx != mot.wedgeIdx)
-					{
-						oldWedgeIdx = 0;
-						if (aConfig.WedgeIndices.size() > 0)
-						{
-							oldWedgeIdx = mot.wedgeIdx;
-						}
-
-						wedge_d.CopyHostToDevice((float*)wedges[oldWedgeIdx]->GetData());
-						rotWedge.SetTexture(wedge_d);
-					}
-					sumCount++;
-
-					ss << mot.GetIndexCoding(aConfig.NamingConv) << ".em";
-
-					cout << mpi_part << ": " << "Part nr: " << mot.partNr << " ref: " << currentReference << " summed up: " << sumCount << " skipped: " << skipped << " = " << sumCount + skipped << " of " << motCount << endl;
-
-					EMFile part(ss.str());
-					part.OpenAndRead();
-					part.ReadHeaderInfo();
-
-					int size = part.DimX;
-
-					partReal.CopyHostToDevice(part.GetData());
-
-					float3 shift;
-					shift.x = -mot.x_Shift;
-					shift.y = -mot.y_Shift;
-					shift.z = -mot.z_Shift;
-
-					rot.SetTextureShift(partReal);
-					rot.Shift(partRot, shift);
-
-					rot.SetTexture(partRot);
-					rot.Rot(partReal, -mot.psi, -mot.phi, -mot.theta);
-
-					rotWedge.Rot(wedge_d, -mot.psi, -mot.phi, -mot.theta);
-					sub.Add(wedge_d, wedgeSum);
-
-					makecplx.MakeCplxWithSub(partReal, partCplx, 0);
-
-
-					cufftSafeCall(cufftExecC2C(ffthandle, (cufftComplex*)partCplx.GetDevicePtr(), (cufftComplex*)tempCplx.GetDevicePtr(), CUFFT_FORWARD));
-					fft.FFTShift2(tempCplx, partCplx);
-					mul.MulVolCplx(wedge_d, partCplx);
-
-					fft.FFTShift2(partCplx, tempCplx);
-
-					cufftSafeCall(cufftExecC2C(ffthandle, (cufftComplex*)tempCplx.GetDevicePtr(), (cufftComplex*)partCplx.GetDevicePtr(), CUFFT_INVERSE));
-
-					mul.Mul(1.0f / (float)size / (float)size / (float)size, partCplx);
-
-					makecplx.MakeReal(partCplx, partReal);
-
-					sub.Add(partReal, partSum);
-
-					if (sumCount % 2 == 0)
-					{
-						sub.Add(partReal, partSumEven);
-						sub.Add(wedge_d, wedgeSumE);
-					}
-					else
-					{
-						sub.Add(partReal, partSumOdd);
-						sub.Add(wedge_d, wedgeSumO);
-					}
-
-					if (i < motCount / 2)
-					{
-						sub.Add(partReal, partSumA);
-						sub.Add(wedge_d, wedgeSumA);
-					}
-					else
-					{
-						sub.Add(partReal, partSumB);
-						sub.Add(wedge_d, wedgeSumB);
-					}
-
-				}
-
-				partsPerRef.push_back(sumCount);
-
-				if (mpi_part == 0)
-				{
-					float* buffer = new float[size*size*size];
-					for (int mpi = 1; mpi < mpi_size; mpi++)
-					{
-						MPI_Recv(buffer, size*size*size, MPI_FLOAT, mpi, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-						partReal.CopyHostToDevice(buffer);
-						sub.Add(partReal, partSum);
-						MPI_Recv(buffer, size*size*size, MPI_FLOAT, mpi, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-						partReal.CopyHostToDevice(buffer);
-						sub.Add(partReal, wedgeSum);
-
-						MPI_Recv(buffer, size*size*size, MPI_FLOAT, mpi, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-						partReal.CopyHostToDevice(buffer);
-						sub.Add(partReal, partSumEven);
-						MPI_Recv(buffer, size*size*size, MPI_FLOAT, mpi, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-						partReal.CopyHostToDevice(buffer);
-						sub.Add(partReal, wedgeSumE);
-
-						MPI_Recv(buffer, size*size*size, MPI_FLOAT, mpi, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-						partReal.CopyHostToDevice(buffer);
-						sub.Add(partReal, partSumOdd);
-						MPI_Recv(buffer, size*size*size, MPI_FLOAT, mpi, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-						partReal.CopyHostToDevice(buffer);
-						sub.Add(partReal, wedgeSumO);
-
-						MPI_Recv(buffer, size*size*size, MPI_FLOAT, mpi, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-						partReal.CopyHostToDevice(buffer);
-						sub.Add(partReal, partSumA);
-						MPI_Recv(buffer, size*size*size, MPI_FLOAT, mpi, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-						partReal.CopyHostToDevice(buffer);
-						sub.Add(partReal, wedgeSumA);
-
-						MPI_Recv(buffer, size*size*size, MPI_FLOAT, mpi, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-						partReal.CopyHostToDevice(buffer);
-						sub.Add(partReal, partSumB);
-						MPI_Recv(buffer, size*size*size, MPI_FLOAT, mpi, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-						partReal.CopyHostToDevice(buffer);
-						sub.Add(partReal, wedgeSumB);
-					}
-					delete[] buffer;
-				}
-				else
-				{
-					float* buffer = new float[size*size*size];
-
-					partSum.CopyDeviceToHost(buffer);
-					MPI_Send(buffer, size*size*size, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
-					wedgeSum.CopyDeviceToHost(buffer);
-					MPI_Send(buffer, size*size*size, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
-
-					partSumEven.CopyDeviceToHost(buffer);
-					MPI_Send(buffer, size*size*size, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
-					wedgeSumE.CopyDeviceToHost(buffer);
-					MPI_Send(buffer, size*size*size, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
-
-					partSumOdd.CopyDeviceToHost(buffer);
-					MPI_Send(buffer, size*size*size, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
-					wedgeSumO.CopyDeviceToHost(buffer);
-					MPI_Send(buffer, size*size*size, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
-
-					partSumA.CopyDeviceToHost(buffer);
-					MPI_Send(buffer, size*size*size, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
-					wedgeSumA.CopyDeviceToHost(buffer);
-					MPI_Send(buffer, size*size*size, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
-
-					partSumB.CopyDeviceToHost(buffer);
-					MPI_Send(buffer, size*size*size, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
-					wedgeSumB.CopyDeviceToHost(buffer);
-					MPI_Send(buffer, size*size*size, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
-
-					delete[] buffer;
-				}
-
-
-				if (mpi_part == 0)
-				{
-					max.MaxIndex(wedgeSum, temp, tempCplx);
-					/*float* test2 = new float[128 * 128 * 128];
-					partSum.CopyDeviceToHost(test2);
-					emwrite("Z:\\kunz\\Documents\\TestSubTomogramAveraging\\testPart.em", test2, 128, 128, 128);*/
-
-					makecplx.MakeCplxWithSub(partSum, partCplx, 0);
-					cufftSafeCall(cufftExecC2C(ffthandle, (cufftComplex*)partCplx.GetDevicePtr(), (cufftComplex*)tempCplx.GetDevicePtr(), CUFFT_FORWARD));
-					fft.FFTShift2(tempCplx, partCplx);
-
-					/*float* test = new float[128 * 128 * 128];
-					wedgeSum.CopyDeviceToHost(test);
-					emwrite("Z:\\kunz\\Documents\\TestSubTomogramAveraging\\testWedge.em", test, 128, 128, 128);*/
-					
-					wedgeNorm.WedgeNorm(wedgeSum, partCplx, temp, 0);
-
-					fft.FFTShift2(partCplx, tempCplx);
-					cufftSafeCall(cufftExecC2C(ffthandle, (cufftComplex*)tempCplx.GetDevicePtr(), (cufftComplex*)partCplx.GetDevicePtr(), CUFFT_INVERSE));
-					mul.Mul(1.0f / (float)size / (float)size / (float)size, partCplx);
-					makecplx.MakeReal(partCplx, partSum);
-
-					max.MaxIndex(wedgeSumO, temp, tempCplx);
-
-					makecplx.MakeCplxWithSub(partSumOdd, partCplx, 0);
-					cufftSafeCall(cufftExecC2C(ffthandle, (cufftComplex*)partCplx.GetDevicePtr(), (cufftComplex*)tempCplx.GetDevicePtr(), CUFFT_FORWARD));
-					fft.FFTShift2(tempCplx, partCplx);
-
-					wedgeNorm.WedgeNorm(wedgeSumO, partCplx, temp, 0);
-
-					fft.FFTShift2(partCplx, tempCplx);
-					cufftSafeCall(cufftExecC2C(ffthandle, (cufftComplex*)tempCplx.GetDevicePtr(), (cufftComplex*)partCplx.GetDevicePtr(), CUFFT_INVERSE));
-					mul.Mul(1.0f / (float)size / (float)size / (float)size, partCplx);
-					makecplx.MakeReal(partCplx, partSumOdd);
-
-
-
-					max.MaxIndex(wedgeSumE, temp, tempCplx);
-
-					makecplx.MakeCplxWithSub(partSumEven, partCplx, 0);
-					cufftSafeCall(cufftExecC2C(ffthandle, (cufftComplex*)partCplx.GetDevicePtr(), (cufftComplex*)tempCplx.GetDevicePtr(), CUFFT_FORWARD));
-					fft.FFTShift2(tempCplx, partCplx);
-
-					wedgeNorm.WedgeNorm(wedgeSumE, partCplx, temp, 0);
-
-					fft.FFTShift2(partCplx, tempCplx);
-					cufftSafeCall(cufftExecC2C(ffthandle, (cufftComplex*)tempCplx.GetDevicePtr(), (cufftComplex*)partCplx.GetDevicePtr(), CUFFT_INVERSE));
-					mul.Mul(1.0f / (float)size / (float)size / (float)size, partCplx);
-					makecplx.MakeReal(partCplx, partSumEven);
-
-
-
-					max.MaxIndex(wedgeSumA, temp, tempCplx);
-
-					makecplx.MakeCplxWithSub(partSumA, partCplx, 0);
-					cufftSafeCall(cufftExecC2C(ffthandle, (cufftComplex*)partCplx.GetDevicePtr(), (cufftComplex*)tempCplx.GetDevicePtr(), CUFFT_FORWARD));
-					fft.FFTShift2(tempCplx, partCplx);
-
-					wedgeNorm.WedgeNorm(wedgeSumA, partCplx, temp, 0);
-
-					fft.FFTShift2(partCplx, tempCplx);
-					cufftSafeCall(cufftExecC2C(ffthandle, (cufftComplex*)tempCplx.GetDevicePtr(), (cufftComplex*)partCplx.GetDevicePtr(), CUFFT_INVERSE));
-					mul.Mul(1.0f / (float)size / (float)size / (float)size, partCplx);
-					makecplx.MakeReal(partCplx, partSumA);
-
-
-
-					max.MaxIndex(wedgeSumB, temp, tempCplx);
-
-					makecplx.MakeCplxWithSub(partSumB, partCplx, 0);
-					cufftSafeCall(cufftExecC2C(ffthandle, (cufftComplex*)partCplx.GetDevicePtr(), (cufftComplex*)tempCplx.GetDevicePtr(), CUFFT_FORWARD));
-					fft.FFTShift2(tempCplx, partCplx);
-
-					wedgeNorm.WedgeNorm(wedgeSumB, partCplx, temp, 0);
-
-					fft.FFTShift2(partCplx, tempCplx);
-					cufftSafeCall(cufftExecC2C(ffthandle, (cufftComplex*)tempCplx.GetDevicePtr(), (cufftComplex*)partCplx.GetDevicePtr(), CUFFT_INVERSE));
-					mul.Mul(1.0f / (float)size / (float)size / (float)size, partCplx);
-					makecplx.MakeReal(partCplx, partSumB);
-
-
-
-					float* sum = new float[size*size*size];
-
-					if (aConfig.ApplySymmetry == Configuration::Symmetry_Rotate180)
-					{
-						float* nowedge = new float[size*size*size];
-						float* part = new float[size*size*size];
-						for (size_t i = 0; i < size*size*size; i++)
-						{
-							nowedge[i] = 1;
-						}
-						partSum.CopyDeviceToHost(sum);
-						rot.SetOldAngles(0, 0, 0);
-						rot.SetTexture(partSum);
-						rot.Rot(temp, 180.0f, 0, 0);
-						temp.CopyDeviceToHost(part);
-
-						/*emwrite("testpart.em", part, size, size, size);
-						emwrite("testSum.em", sum, size, size, size);*/
-
-
-						AvgProcess p(size, 0, ctx, sum, nowedge, nowedge, 1, 0, 5, 3, aConfig.BinarizeMask, aConfig.RotateMaskCC, false, aConfig.LinearInterpolation);
-
-						maxVals_t v = p.execute(part, nowedge, NULL, 0, 0, 0, (float)aConfig.HighPass, (float)aConfig.LowPass, (float)aConfig.Sigma, make_float3(0, 0, 0), aConfig.CouplePhiToPsi, false, 0);
-						int sx, sy, sz;
-						v.getXYZ(size, sx, sy, sz);
-
-						cout << mpi_part << ": " << "Found shift for symmetry: " << sx << ", " << sy << ", " << sz << v.ccVal << endl;
-						cout << mpi_part << ": " << "Found PSI/Theta for symmetry: " << v.rphi << " / " << v.rthe << " CC-Val: " << v.ccVal << endl;
-
-						float3 shift;
-						shift.x = -sx;
-						shift.y = -sy;
-						shift.z = -sz;
-
-						rot.SetTextureShift(temp);
-						rot.Shift(partRot, shift);
-
-						rot.SetTexture(partRot);
-						rot.Rot(partReal, 0, -v.rphi, 0);
-
-						sub.Add(partReal, partSum);
-						delete[] nowedge;
-						delete[] part;
-					}
-
-
-					if (aConfig.ApplySymmetry == Configuration::Symmetry_Shift)
-					{
-						//partSum is now the averaged Particle without symmetry
-						rot.SetTextureShift(partSum);
-
-						if (!(aConfig.ShiftSymmetryVector[0].x == 0 && aConfig.ShiftSymmetryVector[0].y == 0 && aConfig.ShiftSymmetryVector[0].z == 0))
-						{
-							rot.Shift(partReal, aConfig.ShiftSymmetryVector[0]);
-							sub.Add(partReal, partSum);
-
-							rot.Shift(partReal, -aConfig.ShiftSymmetryVector[0]);
-							sub.Add(partReal, partSum);
-						}
-
-						if (!(aConfig.ShiftSymmetryVector[1].x == 0 && aConfig.ShiftSymmetryVector[1].y == 0 && aConfig.ShiftSymmetryVector[1].z == 0))
-						{
-							rot.Shift(partReal, aConfig.ShiftSymmetryVector[1]);
-							sub.Add(partReal, partSum);
-
-							rot.Shift(partReal, -aConfig.ShiftSymmetryVector[1]);
-							sub.Add(partReal, partSum);
-						}
-
-						if (!(aConfig.ShiftSymmetryVector[2].x == 0 && aConfig.ShiftSymmetryVector[2].y == 0 && aConfig.ShiftSymmetryVector[2].z == 0))
-						{
-							rot.Shift(partReal, aConfig.ShiftSymmetryVector[2]);
-							sub.Add(partReal, partSum);
-
-							rot.Shift(partReal, -aConfig.ShiftSymmetryVector[2]);
-							sub.Add(partReal, partSum);
-						}
-					}
-
-
-					if (aConfig.ApplySymmetry == Configuration::Symmetry_Helical)
-					{
-						partSum.CopyDeviceToHost(sum);
-						stringstream ss1;
-						string outName = aConfig.Path + aConfig.Reference[ref] + "noSymm_";
-						ss1 << outName << iter << ".em";
-						emwrite(ss1.str(), sum, size, size, size);
-
-						//partSum is now the averaged Particle without symmetry
-						rot.SetTexture(partSum);
-
-
-						/*float rise = 22.92f / (49.0f / 3.0f) / (1.1f * 2);
-						float twist = 360.0f / 49.0f * 3.0f;*/
-						float rise = aConfig.HelicalRise;
-						float twist = aConfig.HelicalTwist;
-
-						for (int i = aConfig.HelicalRepeatStart; i <= aConfig.HelicalRepeatEnd; i++)
-						{
-							if (i != 0)
-							{
-								float angPhi = twist * i;
-								float shift = rise * i;
-
-								rot.Rot(partReal, angPhi, 0, 0);
-								rot.SetTextureShift(partReal);
-								rot.Shift(partReal, make_float3(0, 0, shift));
-								sub.Add(partReal, partSum);
-							}
-						}
-					}
-
-					if (aConfig.ApplySymmetry == Configuration::Symmetry_Rotational)
-					{
-						partSum.CopyDeviceToHost(sum);
-						stringstream ss1;
-						string outName = aConfig.Path + aConfig.Reference[ref] + "noSymm_";
-						ss1 << outName << iter << ".em";
-						emwrite(ss1.str(), sum, size, size, size);
-
-						//partSum is now the averaged Particle without symmetry
-						rot.SetTexture(partSum);
-
-						float angle = aConfig.RotationalAngleStep;
-
-						for (int i = 1; i < aConfig.RotationalCount; i++) //i=0 is the average itself
-						{
-							float angPhi = angle * i;
-
-							rot.Rot(partReal, angPhi, 0, 0);
-							sub.Add(partReal, partSum);
-						}
-					}
-
-
-					if (aConfig.BFactor != 0)
-					{
-						cout << "Apply B-factor of " << aConfig.BFactor << "..." << endl;
-						partSum.CopyDeviceToHost(sum);
-						stringstream ss1;
-						string outName = aConfig.Path + aConfig.Reference[ref] + "noBfac_";
-						ss1 << outName << iter + 1 << ".em";
-						emwrite(ss1.str(), sum, size, size, size);
-
-
-						makecplx.MakeCplxWithSub(partSum, partCplx, 0);
-						cufftSafeCall(cufftExecC2C(ffthandle, (cufftComplex*)partCplx.GetDevicePtr(), (cufftComplex*)tempCplx.GetDevicePtr(), CUFFT_FORWARD));
-						fft.FFTShift2(tempCplx, partCplx);
-
-						float2* particle = new float2[size * size * size];
-						partCplx.CopyDeviceToHost(particle);
-
-
-						for (int z = 0; z < size; z++)
-						{
-							for (int y = 0; y < size; y++)
-							{
-								for (int x = 0; x < size; x++)
-								{
-									int dz = (z - size / 2);
-									int dy = (y - size / 2);
-									int dx = (x - size / 2);
-
-									float d = sqrt(dx * dx + dy * dy + dz * dz);
-
-									d = round(d);
-									d = d >(size / 2 - 1) ? (size / 2 - 1) : d;
-
-									float res = size / (d + 1) * aConfig.PixelSize;
-
-									float value = expf(-aConfig.BFactor / (4.0f * res * res));
-
-									size_t idx = z * size * size + y * size + x;
-									float2 pixel = particle[idx];
-									pixel.x *= value;
-									pixel.y *= value;
-									particle[idx] = pixel;
-								}
-							}
-						}
-
-
-						partCplx.CopyHostToDevice(particle);
-						delete[] particle;
-						fft.FFTShift2(partCplx, tempCplx);
-						cufftSafeCall(cufftExecC2C(ffthandle, (cufftComplex*)tempCplx.GetDevicePtr(), (cufftComplex*)partCplx.GetDevicePtr(), CUFFT_INVERSE));
-						mul.Mul(1.0f / (float)size / (float)size / (float)size, partCplx);
-						makecplx.MakeReal(partCplx, partSum);
-					}
-
-
-					partSum.CopyDeviceToHost(sum);
-					stringstream ss1;
-					string outName = aConfig.Path + aConfig.Reference[ref];
-					ss1 << outName << iter << ".em";
-					emwrite(ss1.str(), sum, size, size, size);
-
-					partSumEven.CopyDeviceToHost(sum);
-					stringstream ss2;
-					ss2 << outName << iter << "Even.em";
-					emwrite(ss2.str(), sum, size, size, size);
-					partSumOdd.CopyDeviceToHost(sum);
-					stringstream ss3;
-					ss3 << outName << iter << "Odd.em";
-					emwrite(ss3.str(), sum, size, size, size);
-
-					partSumA.CopyDeviceToHost(sum);
-					stringstream ss5;
-					ss5 << outName << iter << "A.em";
-					emwrite(ss5.str(), sum, size, size, size);
-					partSumB.CopyDeviceToHost(sum);
-					stringstream ss4;
-					ss4 << outName << iter << "B.em";
-					emwrite(ss4.str(), sum, size, size, size);
-					delete[] sum;
-				}
-
-			}
-
-
-
-			if (mpi_part == 0)
-			{
-				int* buffer = new int[aConfig.Reference.size()];
-				for (int mpi = 1; mpi < mpi_size; mpi++)
-				{
-					MPI_Recv(buffer, aConfig.Reference.size(), MPI_INT, mpi, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-					for (size_t i = 0; i < aConfig.Reference.size(); i++)
-					{
-						partsPerRef[i] += buffer[i];
-					}
-				}
-
-				int totalUsed = 0;
-				for (size_t i = 0; i < aConfig.Reference.size(); i++)
-				{
-					totalUsed += partsPerRef[i];
-				}
-
-				//Output statistics:
-				cout << "Total particles:   " << totalCount << endl;
-				cout << "Ignored particles: " << totalCount - totalUsed << endl;
-				cout << "Used particles:    " << totalUsed << endl;
-
-				if (aConfig.MultiReference)
-				{
-					for (size_t i = 0; i < aConfig.Reference.size(); i++)
-					{
-						cout << "Used for ref" << i + 1 << ":     " << partsPerRef[i] << endl;
-					}
-				}
-
-				delete[] buffer;
-			}
-			else
-			{
-				MPI_Send(&partsPerRef[0], aConfig.Reference.size(), MPI_INT, 0, 0, MPI_COMM_WORLD);
-			}
-
-			cufftDestroy(ffthandle);
-		}
-
-		MPI_Barrier(MPI_COMM_WORLD);
-		////////////////////////////
-		/// End of Add particles ///
-		////////////////////////////
+    /////////////////////
+    /// Add particles ///
+    /////////////////////
+
+    /* AS Converted Version of Add Particle */
+    {
+
+      hipModule_t modbasicKernels =
+          ctx->LoadModulePTX(KernelbasicKernels, 0, false, false);
+      hipModule_t modkernel = ctx->LoadModulePTX(Kernelkernel, 0, false, false);
+
+      hipStream_t stream = 0;
+
+#if defined(__HIP_PLATFORM_HCC__) && !defined(__HIP_PLATFORM_NVCC__)
+      int n[] = {(int)size, (int)size, (int)size};
+      hipfftHandle ffthandle;
+      hipfftPlanMany(&ffthandle, 3, n, NULL, 0, 0, NULL, 0, 0, HIPFFT_C2C, 1);
+      hipfftSetStream(ffthandle, stream);
+#else
+      int n[] = {(int)size, (int)size, (int)size};
+      cufftHandle ffthandle;
+      cufftPlanMany(&ffthandle, 3, n, NULL, 0, 0, NULL, 0, 0, CUFFT_C2C, 1);
+      cufftSetStream(ffthandle, stream);
+#endif
+
+      // HipRot rot(size, stream, ctx, aConfig.LinearInterpolation);
+      RotateKernel aRotateKernelROT(modbasicKernels, grid, block, size,
+                                    aConfig.LinearInterpolation);
+      // HipRot rotWedge(size, stream, ctx, aConfig.LinearInterpolation);
+      RotateKernel aRotateKernelROTWEDGE(modbasicKernels, grid, block, size,
+                                         aConfig.LinearInterpolation);
+
+      // HipSub sub(size, stream, ctx);
+      // HipMakeCplxWithSub makecplx(size, stream, ctx);
+      // HipBinarize binarize(size, stream, ctx);
+      // HipMul mul(size, stream, ctx);
+      // HipFFT fft(size, stream, ctx);
+      // HipReducer max(size*size*size, stream, ctx);
+      Reducer aReduceKernel(modkernel, grid, block);
+      // HipWedgeNorm wedgeNorm(size, stream, ctx);
+
+      HipDeviceVariable partReal(size * size * size * sizeof(float));
+      HipDeviceVariable partRot(size * size * size * sizeof(float));
+      HipDeviceVariable partCplx(size * size * size * sizeof(float2));
+      HipDeviceVariable wedge_d(size * size * size * sizeof(float));
+      HipDeviceVariable wedgeSum(size * size * size * sizeof(float));
+      HipDeviceVariable wedgeSumO(size * size * size * sizeof(float));
+      HipDeviceVariable wedgeSumE(size * size * size * sizeof(float));
+      HipDeviceVariable wedgeSumA(size * size * size * sizeof(float));
+      HipDeviceVariable wedgeSumB(size * size * size * sizeof(float));
+      HipDeviceVariable tempCplx(size * size * size * sizeof(float2));
+      HipDeviceVariable temp(size * size * size * sizeof(float));
+      HipDeviceVariable partSum(size * size * size * sizeof(float));
+      HipDeviceVariable partSumEven(size * size * size * sizeof(float));
+      HipDeviceVariable partSumOdd(size * size * size * sizeof(float));
+      HipDeviceVariable partSumA(size * size * size * sizeof(float));
+      HipDeviceVariable partSumB(size * size * size * sizeof(float));
+
+      int skipped = 0;
+      vector<int> partsPerRef;
+
+      for (size_t ref = 0; ref < aConfig.Reference.size(); ref++) 
+      {
+        float currentReference = ref + 1;
+
+        partSum.Memset(0);
+        partSumOdd.Memset(0);
+        partSumEven.Memset(0);
+        partSumA.Memset(0);
+        partSumB.Memset(0);
+
+        wedgeSum.Memset(0);
+        wedgeSumO.Memset(0);
+        wedgeSumE.Memset(0);
+        wedgeSumA.Memset(0);
+        wedgeSumB.Memset(0);
+
+        int sumCount = 0;
+        int motCount = partCount;
+
+        float limit = 0;
+
+        limit = meanCCValue;
+        int oldWedgeIdx = -1;
+
+#ifdef SHORTRUN
+        for (int i = startParticle; i < startParticle + SHORTRUN; i++) {
+#else
+        for (int i = startParticle; i < endParticle; i++) {
+#endif
+
+          motive mot = motl.GetAt(i);
+          stringstream ss;
+          ss << aConfig.Path << aConfig.Particles;
+
+          if (mot.classNo != currentReference && aConfig.Reference.size() > 1) {
+            continue;
+          }
+          if (mot.ccCoeff < limit) {
+            skipped++;
+            continue;
+          }
+
+          if (oldWedgeIdx != mot.wedgeIdx) {
+            oldWedgeIdx = 0;
+            if (aConfig.WedgeIndices.size() > 0) {
+              oldWedgeIdx = mot.wedgeIdx;
+            }
+
+            wedge_d.CopyHostToDevice((float *)wedges[oldWedgeIdx]->GetData());
+            aRotateKernelROTWEDGE.SetTexture(wedge_d);
+          }
+          sumCount++;
+
+          ss << mot.GetIndexCoding(aConfig.NamingConv) << ".em";
+
+#if VERBOSE >= 1
+          cout << mpi_part << ": "
+               << "Part nr: " << mot.partNr << " ref: " << currentReference
+               << " summed up: " << sumCount << " skipped: " << skipped << " = "
+               << sumCount + skipped << " of " << motCount << endl;
+#endif
+
+          EMFile part(ss.str());
+          part.OpenAndRead();
+          part.ReadHeaderInfo();
+
+          int size = part.DimX;
+
+          partReal.CopyHostToDevice(part.GetData());
+
+          float3 shift;
+          shift.x = -mot.x_Shift;
+          shift.y = -mot.y_Shift;
+          shift.z = -mot.z_Shift;
+
+          aRotateKernelROT.SetTextureShift(partReal);
+          /* */
+          aRotateKernelROT.do_shift(size, partRot, shift);
+
+          aRotateKernelROT.SetTexture(partRot);
+          aRotateKernelROT.do_rotate_improved(size, partReal, -mot.psi, -mot.phi,
+                                     -mot.theta);
+          /* */
+          /*
+          aRotateKernelROT.do_shiftrot3d(size, partReal, -mot.psi, -mot.phi,
+                                     -mot.theta, shift);
+          */
+
+          aRotateKernelROTWEDGE.do_rotate_improved(size, wedge_d, -mot.psi, -mot.phi,
+                                          -mot.theta);
+          // sub.Add(wedge_d, wedgeSum);
+          hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                             (float *)wedge_d.GetDevicePtr(),
+                             (float *)wedgeSum.GetDevicePtr());
+
+          // makecplx.MakeCplxWithSub(partReal, partCplx, 0);
+          hipLaunchKernelGGL(makeCplxWithSub, grid, block, 0, stream, size,
+                             (float *)partReal.GetDevicePtr(),
+                             (float2 *)partCplx.GetDevicePtr(), 0);
+
+          tempCplx.CopyDeviceToDevice(partCplx);
+#if defined(__HIP_PLATFORM_HCC__)
+          // hipMemcpy((hipfftComplex*)tempCplx.GetDevicePtr(),
+          // (hipfftComplex*)partCplx.GetDevicePtr(),
+          // sizeof(hipfftComplex)*size*size*size, hipMemcpyDeviceToDevice);
+          hipfftExecC2C(ffthandle, (hipfftComplex *)tempCplx.GetDevicePtr(),
+                        (hipfftComplex *)tempCplx.GetDevicePtr(),
+                        HIPFFT_FORWARD);
+#else
+          // cudaMemcpy((cufftComplex*)tempCplx.GetDevicePtr(),
+          // (cufftComplex*)partCplx.GetDevicePtr(),
+          // sizeof(cufftComplex)*size*size*size, cudaMemcpyDeviceToDevice);
+          cufftExecC2C(ffthandle, (cufftComplex *)tempCplx.GetDevicePtr(),
+                       (cufftComplex *)tempCplx.GetDevicePtr(), CUFFT_FORWARD);
+#endif
+
+          // fft.FFTShift2(tempCplx, partCplx);
+          hipLaunchKernelGGL(fftshift2, grid, block, 0, stream, size,
+                             (float2 *)tempCplx.GetDevicePtr(),
+                             (float2 *)partCplx.GetDevicePtr());
+
+          // mul.MulVolCplx(wedge_d, partCplx);
+          hipLaunchKernelGGL(mulVol, grid, block, 0, stream, size,
+                             (float *)wedge_d.GetDevicePtr(),
+                             (float2 *)partCplx.GetDevicePtr());
+          /* AF Elementwise Multiplcation of Wedge and Particle */
+
+          // fft.FFTShift2(partCplx, tempCplx);
+          hipLaunchKernelGGL(fftshift2, grid, block, 0, stream, size,
+                             (float2 *)partCplx.GetDevicePtr(),
+                             (float2 *)tempCplx.GetDevicePtr());
+
+          partCplx.CopyDeviceToDevice(tempCplx);
+#if defined(__HIP_PLATFORM_HCC__)
+          hipfftExecC2C(ffthandle, (hipfftComplex *)partCplx.GetDevicePtr(),
+                        (hipfftComplex *)partCplx.GetDevicePtr(),
+                        HIPFFT_BACKWARD);
+#else
+          cufftExecC2C(ffthandle, (cufftComplex *)partCplx.GetDevicePtr(),
+                       (cufftComplex *)partCplx.GetDevicePtr(), CUFFT_INVERSE);
+#endif
+
+          // mul.Mul(1.0f / (float)size / (float)size / (float)size, partCplx);
+          hipLaunchKernelGGL(mul, grid, block, 0, stream, size,
+                             1.0f / (float)size / (float)size / (float)size,
+                             (float2 *)partCplx.GetDevicePtr());
+
+          // makecplx.MakeReal(partCplx, partReal);
+          hipLaunchKernelGGL(makeReal, grid, block, 0, stream, size,
+                             (float2 *)partCplx.GetDevicePtr(),
+                             (float *)partReal.GetDevicePtr());
+
+          // sub.Add(partReal, partSum);
+          hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                             (float *)partReal.GetDevicePtr(),
+                             (float *)partSum.GetDevicePtr());
+
+          if (sumCount % 2 == 0) {
+            // sub.Add(partReal, partSumEven);
+            hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                               (float *)partReal.GetDevicePtr(),
+                               (float *)partSumEven.GetDevicePtr());
+            // sub.Add(wedge_d, wedgeSumE);
+            hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                               (float *)wedge_d.GetDevicePtr(),
+                               (float *)wedgeSumE.GetDevicePtr());
+          } else {
+            // sub.Add(partReal, partSumOdd);
+            hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                               (float *)partReal.GetDevicePtr(),
+                               (float *)partSumOdd.GetDevicePtr());
+            // sub.Add(wedge_d, wedgeSumO);
+            hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                               (float *)wedge_d.GetDevicePtr(),
+                               (float *)wedgeSumO.GetDevicePtr());
+          }
+
+          if (i < motCount / 2) {
+            // sub.Add(partReal, partSumA);
+            hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                               (float *)partReal.GetDevicePtr(),
+                               (float *)partSumA.GetDevicePtr());
+            // sub.Add(wedge_d, wedgeSumA);
+            hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                               (float *)wedge_d.GetDevicePtr(),
+                               (float *)wedgeSumA.GetDevicePtr());
+          } else {
+            // sub.Add(partReal, partSumB);
+            hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                               (float *)partReal.GetDevicePtr(),
+                               (float *)partSumB.GetDevicePtr());
+            // sub.Add(wedge_d, wedgeSumB);
+            hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                               (float *)wedge_d.GetDevicePtr(),
+                               (float *)wedgeSumB.GetDevicePtr());
+          }
+        }
+
+        partsPerRef.push_back(sumCount);
+
+        if (mpi_part == 0) {
+          float *buffer = new float[size * size * size];
+          for (int mpi = 1; mpi < mpi_size; mpi++) {
+            MPI_Recv(buffer, size * size * size, MPI_FLOAT, mpi, 0,
+                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            partReal.CopyHostToDevice(buffer);
+            // sub.Add(partReal, partSum);
+            hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                               (float *)partReal.GetDevicePtr(),
+                               (float *)partSum.GetDevicePtr());
+            MPI_Recv(buffer, size * size * size, MPI_FLOAT, mpi, 0,
+                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            partReal.CopyHostToDevice(buffer);
+            // sub.Add(partReal, wedgeSum);
+            hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                               (float *)partReal.GetDevicePtr(),
+                               (float *)wedgeSum.GetDevicePtr());
+
+            MPI_Recv(buffer, size * size * size, MPI_FLOAT, mpi, 0,
+                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            partReal.CopyHostToDevice(buffer);
+            // sub.Add(partReal, partSumEven);
+            hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                               (float *)partReal.GetDevicePtr(),
+                               (float *)partSumEven.GetDevicePtr());
+            MPI_Recv(buffer, size * size * size, MPI_FLOAT, mpi, 0,
+                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            partReal.CopyHostToDevice(buffer);
+            // sub.Add(partReal, wedgeSumE);
+            hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                               (float *)partReal.GetDevicePtr(),
+                               (float *)wedgeSumE.GetDevicePtr());
+
+            MPI_Recv(buffer, size * size * size, MPI_FLOAT, mpi, 0,
+                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            partReal.CopyHostToDevice(buffer);
+            // sub.Add(partReal, partSumOdd);
+            hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                               (float *)partReal.GetDevicePtr(),
+                               (float *)partSumOdd.GetDevicePtr());
+            MPI_Recv(buffer, size * size * size, MPI_FLOAT, mpi, 0,
+                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            partReal.CopyHostToDevice(buffer);
+            // sub.Add(partReal, wedgeSumO);
+            hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                               (float *)partReal.GetDevicePtr(),
+                               (float *)wedgeSumO.GetDevicePtr());
+
+            MPI_Recv(buffer, size * size * size, MPI_FLOAT, mpi, 0,
+                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            partReal.CopyHostToDevice(buffer);
+            // sub.Add(partReal, partSumA);
+            hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                               (float *)partReal.GetDevicePtr(),
+                               (float *)partSumA.GetDevicePtr());
+            MPI_Recv(buffer, size * size * size, MPI_FLOAT, mpi, 0,
+                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            partReal.CopyHostToDevice(buffer);
+            // sub.Add(partReal, wedgeSumA);
+            hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                               (float *)partReal.GetDevicePtr(),
+                               (float *)wedgeSumA.GetDevicePtr());
+
+            MPI_Recv(buffer, size * size * size, MPI_FLOAT, mpi, 0,
+                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            partReal.CopyHostToDevice(buffer);
+            // sub.Add(partReal, partSumB);
+            hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                               (float *)partReal.GetDevicePtr(),
+                               (float *)partSumB.GetDevicePtr());
+            MPI_Recv(buffer, size * size * size, MPI_FLOAT, mpi, 0,
+                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            partReal.CopyHostToDevice(buffer);
+            // sub.Add(partReal, wedgeSumB);
+            hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                               (float *)partReal.GetDevicePtr(),
+                               (float *)wedgeSumB.GetDevicePtr());
+          }
+          delete[] buffer;
+        } else {
+          float *buffer = new float[size * size * size];
+
+          partSum.CopyDeviceToHost(buffer);
+          MPI_Send(buffer, size * size * size, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
+          wedgeSum.CopyDeviceToHost(buffer);
+          MPI_Send(buffer, size * size * size, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
+
+          partSumEven.CopyDeviceToHost(buffer);
+          MPI_Send(buffer, size * size * size, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
+          wedgeSumE.CopyDeviceToHost(buffer);
+          MPI_Send(buffer, size * size * size, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
+
+          partSumOdd.CopyDeviceToHost(buffer);
+          MPI_Send(buffer, size * size * size, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
+          wedgeSumO.CopyDeviceToHost(buffer);
+          MPI_Send(buffer, size * size * size, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
+
+          partSumA.CopyDeviceToHost(buffer);
+          MPI_Send(buffer, size * size * size, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
+          wedgeSumA.CopyDeviceToHost(buffer);
+          MPI_Send(buffer, size * size * size, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
+
+          partSumB.CopyDeviceToHost(buffer);
+          MPI_Send(buffer, size * size * size, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
+          wedgeSumB.CopyDeviceToHost(buffer);
+          MPI_Send(buffer, size * size * size, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
+
+          delete[] buffer;
+        }
+
+        if (mpi_part == 0) {
+          // max.MaxIndex(wedgeSum, temp, tempCplx);
+          aReduceKernel.maxindex(wedgeSum, temp, tempCplx, size * size * size);
+
+          /* TODO AS Write Particle into EM file */
+          /*float* testParticle = new float[size*size*size];
+          partSum.CopyDeviceToHost(testParticle);
+          emwrite("testParticle.em", testParticle, size, size, size);
+          delete[] testParticle;
+          /**/
+          
+          // makecplx.MakeCplxWithSub(partSum, partCplx, 0);
+          hipLaunchKernelGGL(makeCplxWithSub, grid, block, 0, stream, size,
+                             (float *)partSum.GetDevicePtr(),
+                             (float2 *)partCplx.GetDevicePtr(), 0);
+
+          tempCplx.CopyDeviceToDevice(partCplx);
+#if defined(__HIP_PLATFORM_HCC__)
+          hipfftExecC2C(ffthandle, (hipfftComplex *)tempCplx.GetDevicePtr(),
+                        (hipfftComplex *)tempCplx.GetDevicePtr(),
+                        HIPFFT_FORWARD);
+#else
+          cufftExecC2C(ffthandle, (cufftComplex *)tempCplx.GetDevicePtr(),
+                       (cufftComplex *)tempCplx.GetDevicePtr(), CUFFT_FORWARD);
+#endif
+
+          // fft.FFTShift2(tempCplx, partCplx);
+          hipLaunchKernelGGL(fftshift2, grid, block, 0, stream, size,
+                             (float2 *)tempCplx.GetDevicePtr(),
+                             (float2 *)partCplx.GetDevicePtr());
+
+          /* TODO AS Write Wedge into EM file */
+          /*float* testWedge = new float[size*size*size];
+          wedgeSum.CopyDeviceToHost(testWedge);
+          emwrite("testWedge.em", testWedge, size, size, size);
+          delete[] testWedge;
+
+          float maxVal = 0;
+          temp.CopyDeviceToHost(&maxVal, sizeof(float));
+          cout << "Max value wedge: " << maxVal << endl;
+          /* */
+
+          /* AS TODO WRITE WEDGE SUM TO EMFILE */
+
+          // wedgeNorm.WedgeNorm(wedgeSum, partCplx, temp, 0);
+          hipLaunchKernelGGL(wedgeNorm, grid, block, 0, stream, size,
+                             (float *)wedgeSum.GetDevicePtr(),
+                             (float2 *)partCplx.GetDevicePtr(),
+                             (float *)temp.GetDevicePtr(), 1);
+
+          // fft.FFTShift2(partCplx, tempCplx);
+          hipLaunchKernelGGL(fftshift2, grid, block, 0, stream, size,
+                             (float2 *)partCplx.GetDevicePtr(),
+                             (float2 *)tempCplx.GetDevicePtr());
+
+          partCplx.CopyDeviceToDevice(tempCplx);
+#if defined(__HIP_PLATFORM_HCC__)
+          hipfftExecC2C(ffthandle, (hipfftComplex *)partCplx.GetDevicePtr(),
+                        (hipfftComplex *)partCplx.GetDevicePtr(),
+                        HIPFFT_BACKWARD);
+#else
+          cufftExecC2C(ffthandle, (cufftComplex *)partCplx.GetDevicePtr(),
+                       (cufftComplex *)partCplx.GetDevicePtr(), CUFFT_INVERSE);
+#endif
+
+          // mul.Mul(1.0f / (float)size / (float)size / (float)size, partCplx);
+          hipLaunchKernelGGL(mul, grid, block, 0, stream, size,
+                             1.0f / (float)size / (float)size / (float)size,
+                             (float2 *)partCplx.GetDevicePtr());
+
+          // makecplx.MakeReal(partCplx, partSum);
+          hipLaunchKernelGGL(makeReal, grid, block, 0, stream, size,
+                             (float2 *)partCplx.GetDevicePtr(),
+                             (float *)partSum.GetDevicePtr());
+
+          // max.MaxIndex(wedgeSumO, temp, tempCplx);
+          aReduceKernel.maxindex(wedgeSumO, temp, tempCplx, size * size * size);
+
+          // makecplx.MakeCplxWithSub(partSumOdd, partCplx, 0);
+          hipLaunchKernelGGL(makeCplxWithSub, grid, block, 0, stream, size,
+                             (float *)partSumOdd.GetDevicePtr(),
+                             (float2 *)partCplx.GetDevicePtr(), 0);
+
+          tempCplx.CopyDeviceToDevice(partCplx);
+#if defined(__HIP_PLATFORM_HCC__)
+          hipfftExecC2C(ffthandle, (hipfftComplex *)tempCplx.GetDevicePtr(),
+                        (hipfftComplex *)tempCplx.GetDevicePtr(),
+                        HIPFFT_FORWARD);
+#else
+          cufftExecC2C(ffthandle, (cufftComplex *)tempCplx.GetDevicePtr(),
+                       (cufftComplex *)tempCplx.GetDevicePtr(), CUFFT_FORWARD);
+#endif
+
+          // fft.FFTShift2(tempCplx, partCplx);
+          hipLaunchKernelGGL(fftshift2, grid, block, 0, stream, size,
+                             (float2 *)tempCplx.GetDevicePtr(),
+                             (float2 *)partCplx.GetDevicePtr());
+
+          // wedgeNorm.WedgeNorm(wedgeSumO, partCplx, temp, 0);
+          hipLaunchKernelGGL(wedgeNorm, grid, block, 0, stream, size,
+                             (float *)wedgeSumO.GetDevicePtr(),
+                             (float2 *)partCplx.GetDevicePtr(),
+                             (float *)temp.GetDevicePtr(), 0);
+
+          // fft.FFTShift2(partCplx, tempCplx);
+          hipLaunchKernelGGL(fftshift2, grid, block, 0, stream, size,
+                             (float2 *)partCplx.GetDevicePtr(),
+                             (float2 *)tempCplx.GetDevicePtr());
+
+          partCplx.CopyDeviceToDevice(tempCplx);
+#if defined(__HIP_PLATFORM_HCC__)
+          hipfftExecC2C(ffthandle, (hipfftComplex *)partCplx.GetDevicePtr(),
+                        (hipfftComplex *)partCplx.GetDevicePtr(),
+                        HIPFFT_BACKWARD);
+#else
+          cufftExecC2C(ffthandle, (cufftComplex *)partCplx.GetDevicePtr(),
+                       (cufftComplex *)partCplx.GetDevicePtr(), CUFFT_INVERSE);
+#endif
+
+          // mul.Mul(1.0f / (float)size / (float)size / (float)size, partCplx);
+          hipLaunchKernelGGL(mul, grid, block, 0, stream, size,
+                             1.0f / (float)size / (float)size / (float)size,
+                             (float2 *)partCplx.GetDevicePtr());
+
+          // makecplx.MakeReal(partCplx, partSumOdd);
+          hipLaunchKernelGGL(makeReal, grid, block, 0, stream, size,
+                             (float2 *)partCplx.GetDevicePtr(),
+                             (float *)partSumOdd.GetDevicePtr());
+
+          // max.MaxIndex(wedgeSumE, temp, tempCplx);
+          aReduceKernel.maxindex(wedgeSumE, temp, tempCplx, size * size * size);
+
+          // makecplx.MakeCplxWithSub(partSumEven, partCplx, 0);
+          hipLaunchKernelGGL(makeCplxWithSub, grid, block, 0, stream, size,
+                             (float *)partSumEven.GetDevicePtr(),
+                             (float2 *)partCplx.GetDevicePtr(), 0);
+
+          tempCplx.CopyDeviceToDevice(partCplx);
+#if defined(__HIP_PLATFORM_HCC__)
+          hipfftExecC2C(ffthandle, (hipfftComplex *)tempCplx.GetDevicePtr(),
+                        (hipfftComplex *)tempCplx.GetDevicePtr(),
+                        HIPFFT_FORWARD);
+#else
+          cufftExecC2C(ffthandle, (cufftComplex *)tempCplx.GetDevicePtr(),
+                       (cufftComplex *)tempCplx.GetDevicePtr(), CUFFT_FORWARD);
+#endif
+
+          // fft.FFTShift2(tempCplx, partCplx);
+          hipLaunchKernelGGL(fftshift2, grid, block, 0, stream, size,
+                             (float2 *)tempCplx.GetDevicePtr(),
+                             (float2 *)partCplx.GetDevicePtr());
+
+          // wedgeNorm.WedgeNorm(wedgeSumE, partCplx, temp, 0);
+          hipLaunchKernelGGL(wedgeNorm, grid, block, 0, stream, size,
+                             (float *)wedgeSumE.GetDevicePtr(),
+                             (float2 *)partCplx.GetDevicePtr(),
+                             (float *)temp.GetDevicePtr(), 0);
+
+          // fft.FFTShift2(partCplx, tempCplx);
+          hipLaunchKernelGGL(fftshift2, grid, block, 0, stream, size,
+                             (float2 *)partCplx.GetDevicePtr(),
+                             (float2 *)tempCplx.GetDevicePtr());
+
+          partCplx.CopyDeviceToDevice(tempCplx);
+#if defined(__HIP_PLATFORM_HCC__)
+          hipfftExecC2C(ffthandle, (hipfftComplex *)partCplx.GetDevicePtr(),
+                        (hipfftComplex *)partCplx.GetDevicePtr(),
+                        HIPFFT_BACKWARD);
+#else
+          cufftExecC2C(ffthandle, (cufftComplex *)partCplx.GetDevicePtr(),
+                       (cufftComplex *)partCplx.GetDevicePtr(), CUFFT_INVERSE);
+#endif
+
+          // mul.Mul(1.0f / (float)size / (float)size / (float)size, partCplx);
+          hipLaunchKernelGGL(mul, grid, block, 0, stream, size,
+                             1.0f / (float)size / (float)size / (float)size,
+                             (float2 *)partCplx.GetDevicePtr());
+
+          // makecplx.MakeReal(partCplx, partSumEven);
+          hipLaunchKernelGGL(makeReal, grid, block, 0, stream, size,
+                             (float2 *)partCplx.GetDevicePtr(),
+                             (float *)partSumEven.GetDevicePtr());
+
+          // max.MaxIndex(wedgeSumA, temp, tempCplx);
+          aReduceKernel.maxindex(wedgeSumA, temp, tempCplx, size * size * size);
+
+          // makecplx.MakeCplxWithSub(partSumA, partCplx, 0);
+          hipLaunchKernelGGL(makeCplxWithSub, grid, block, 0, stream, size,
+                             (float *)partSumA.GetDevicePtr(),
+                             (float2 *)partCplx.GetDevicePtr(), 0);
+
+          tempCplx.CopyDeviceToDevice(partCplx);
+#if defined(__HIP_PLATFORM_HCC__)
+          hipfftExecC2C(ffthandle, (hipfftComplex *)tempCplx.GetDevicePtr(),
+                        (hipfftComplex *)tempCplx.GetDevicePtr(),
+                        HIPFFT_FORWARD);
+#else
+          cufftExecC2C(ffthandle, (cufftComplex *)tempCplx.GetDevicePtr(),
+                       (cufftComplex *)tempCplx.GetDevicePtr(), CUFFT_FORWARD);
+#endif
+
+          // fft.FFTShift2(tempCplx, partCplx);
+          hipLaunchKernelGGL(fftshift2, grid, block, 0, stream, size,
+                             (float2 *)tempCplx.GetDevicePtr(),
+                             (float2 *)partCplx.GetDevicePtr());
+
+          // wedgeNorm.WedgeNorm(wedgeSumA, partCplx, temp, 0);
+          hipLaunchKernelGGL(wedgeNorm, grid, block, 0, stream, size,
+                             (float *)wedgeSumA.GetDevicePtr(),
+                             (float2 *)partCplx.GetDevicePtr(),
+                             (float *)temp.GetDevicePtr(), 0);
+
+          // fft.FFTShift2(partCplx, tempCplx);
+          hipLaunchKernelGGL(fftshift2, grid, block, 0, stream, size,
+                             (float2 *)partCplx.GetDevicePtr(),
+                             (float2 *)tempCplx.GetDevicePtr());
+
+          partCplx.CopyDeviceToDevice(tempCplx);
+#if defined(__HIP_PLATFORM_HCC__)
+          hipfftExecC2C(ffthandle, (hipfftComplex *)partCplx.GetDevicePtr(),
+                        (hipfftComplex *)partCplx.GetDevicePtr(),
+                        HIPFFT_BACKWARD);
+#else
+          cufftExecC2C(ffthandle, (cufftComplex *)partCplx.GetDevicePtr(),
+                       (cufftComplex *)partCplx.GetDevicePtr(), CUFFT_INVERSE);
+#endif
+
+          // mul.Mul(1.0f / (float)size / (float)size / (float)size, partCplx);
+          hipLaunchKernelGGL(mul, grid, block, 0, stream, size,
+                             1.0f / (float)size / (float)size / (float)size,
+                             (float2 *)partCplx.GetDevicePtr());
+
+          // makecplx.MakeReal(partCplx, partSumA);
+          hipLaunchKernelGGL(makeReal, grid, block, 0, stream, size,
+                             (float2 *)partCplx.GetDevicePtr(),
+                             (float *)partSumA.GetDevicePtr());
+
+          // max.MaxIndex(wedgeSumB, temp, tempCplx);
+          aReduceKernel.maxindex(wedgeSumB, temp, tempCplx, size * size * size);
+
+          // makecplx.MakeCplxWithSub(partSumB, partCplx, 0);
+          hipLaunchKernelGGL(makeCplxWithSub, grid, block, 0, stream, size,
+                             (float *)partSumB.GetDevicePtr(),
+                             (float2 *)partCplx.GetDevicePtr(), 0);
+
+          tempCplx.CopyDeviceToDevice(partCplx);
+#if defined(__HIP_PLATFORM_HCC__)
+          hipfftExecC2C(ffthandle, (hipfftComplex *)tempCplx.GetDevicePtr(),
+                        (hipfftComplex *)tempCplx.GetDevicePtr(),
+                        HIPFFT_FORWARD);
+#else
+          cufftExecC2C(ffthandle, (cufftComplex *)tempCplx.GetDevicePtr(),
+                       (cufftComplex *)tempCplx.GetDevicePtr(), CUFFT_FORWARD);
+#endif
+
+          // fft.FFTShift2(tempCplx, partCplx);
+          hipLaunchKernelGGL(fftshift2, grid, block, 0, stream, size,
+                             (float2 *)tempCplx.GetDevicePtr(),
+                             (float2 *)partCplx.GetDevicePtr());
+
+          // wedgeNorm.WedgeNorm(wedgeSumB, partCplx, temp, 0);
+          hipLaunchKernelGGL(wedgeNorm, grid, block, 0, stream, size,
+                             (float *)wedgeSumB.GetDevicePtr(),
+                             (float2 *)partCplx.GetDevicePtr(),
+                             (float *)temp.GetDevicePtr(), 0);
+
+          // fft.FFTShift2(partCplx, tempCplx);
+          hipLaunchKernelGGL(fftshift2, grid, block, 0, stream, size,
+                             (float2 *)partCplx.GetDevicePtr(),
+                             (float2 *)tempCplx.GetDevicePtr());
+
+          partCplx.CopyDeviceToDevice(tempCplx);
+#if defined(__HIP_PLATFORM_HCC__)
+          hipfftExecC2C(ffthandle, (hipfftComplex *)partCplx.GetDevicePtr(),
+                        (hipfftComplex *)partCplx.GetDevicePtr(),
+                        HIPFFT_BACKWARD);
+#else
+          cufftExecC2C(ffthandle, (cufftComplex *)partCplx.GetDevicePtr(),
+                       (cufftComplex *)partCplx.GetDevicePtr(), CUFFT_INVERSE);
+#endif
+
+          // mul.Mul(1.0f / (float)size / (float)size / (float)size, partCplx);
+          hipLaunchKernelGGL(mul, grid, block, 0, stream, size,
+                             1.0f / (float)size / (float)size / (float)size,
+                             (float2 *)partCplx.GetDevicePtr());
+
+          // makecplx.MakeReal(partCplx, partSumB);
+          hipLaunchKernelGGL(makeReal, grid, block, 0, stream, size,
+                             (float2 *)partCplx.GetDevicePtr(),
+                             (float *)partSumB.GetDevicePtr());
+
+          float *sum = new float[size * size * size];
+
+          if (aConfig.ApplySymmetry == Configuration::Symmetry_Rotate180) {
+            float *nowedge = new float[size * size * size];
+            float *part = new float[size * size * size];
+            for (size_t i = 0; i < size * size * size; i++) {
+              nowedge[i] = 1;
+            }
+            partSum.CopyDeviceToHost(sum);
+            aRotateKernelROT.SetOldAngles(0, 0, 0);
+            aRotateKernelROT.SetTexture(partSum);
+            aRotateKernelROT.do_rotate_improved(size, temp, 180.0f, 0, 0);
+            temp.CopyDeviceToHost(part);
+
+            /* old code
+            emwrite("testpart.em", part, size, size, size);
+            emwrite("testSum.em", sum, size, size, size);
+            */
+
+            AvgProcess *p;
+            if (aConfig.AveragingType == "C2C"){
+              p = new AvgProcessC2C(size, 0, ctx, sum, nowedge, nowedge, 1, 0, 5,
+                    3, aConfig.BinarizeMask, aConfig.RotateMaskCC,
+                    aConfig.UseFilterVolume,
+                    aConfig.LinearInterpolation, modules);
+            } else if (aConfig.AveragingType == "OriginalBinary"){
+              p = new AvgProcessOriginalBinaryKernels(size, 0, ctx, sum, 
+                    nowedge, nowedge, 1, 0, 5, 3, aConfig.BinarizeMask,
+                    aConfig.RotateMaskCC, aConfig.UseFilterVolume,
+                    aConfig.LinearInterpolation, modules);
+            } else if (aConfig.AveragingType == "OriginalHIP"){
+              p = new AvgProcessOriginal(size, 0, ctx, sum, nowedge, nowedge, 
+                    1, 0, 5, 3, aConfig.BinarizeMask, aConfig.RotateMaskCC,
+                    aConfig.UseFilterVolume,
+                    aConfig.LinearInterpolation, modules);
+            } else if (aConfig.AveragingType == "PhaseCorrelation"){
+              p = new AvgProcessPhaseCorrelation(size, 0, ctx, sum, nowedge,
+                     nowedge, 1, 0, 5, 3, aConfig.BinarizeMask,
+                    aConfig.RotateMaskCC, aConfig.UseFilterVolume,
+                    aConfig.LinearInterpolation, modules);
+            } else {
+              p = new AvgProcessR2C(size, 0, ctx, sum, nowedge, nowedge, 1, 0, 5,
+                    3, aConfig.BinarizeMask, aConfig.RotateMaskCC,
+                    aConfig.UseFilterVolume,
+                    aConfig.LinearInterpolation, modules);
+            } 
+/* AS deprecated was used to maximize performance by chosing AveragingType at
+ * compiletime
+ *
+// #if AVGKIND == 1
+//       p = new AvgProcessC2C(size, 0, ctx, sum, nowedge, nowedge, 1, 0, 5,
+//                                   3, aConfig.BinarizeMask, aConfig.RotateMaskCC,
+//                                   aConfig.UseFilterVolume,
+//                                   aConfig.LinearInterpolation, modules);
+//       std::cout << "HIP Quality Improved Alignment using C2C (no performance improvements)" << std::endl;  
+// #elif AVGKIND == 2
+//       p = new AvgProcessR2C(size, 0, ctx, sum, nowedge, nowedge, 1, 0, 5,
+//                               3, aConfig.BinarizeMask, aConfig.RotateMaskCC,
+//                               aConfig.UseFilterVolume,
+//                               aConfig.LinearInterpolation, modules);
+//       std::cout << "HIP Quality and Performance Improved Alignment using R2C (all improvements)" << std::endl;
+// #elif AVGKIND == 3
+//       p = new AvgProcessR2C_Stream(
+//           size, 0, ctx, sum, nowedge, nowedge, 1, 0, 5, 3, aConfig.BinarizeMask,
+//           aConfig.RotateMaskCC, aConfig.UseFilterVolume,
+//           aConfig.LinearInterpolation, modules);
+//       std::cout << "unfinished Improvement" << std::endl;
+// #elif AVGKIND == 4
+//       p = new AvgProcessReal2Complex(
+//           size, 0, ctx, sum, nowedge, nowedge, 1, 0, 5, 3, aConfig.BinarizeMask,
+//           aConfig.RotateMaskCC, aConfig.UseFilterVolume,
+//           aConfig.LinearInterpolation, modules);
+//       std::cout << "unfinished Improvement" << std::endl;
+// #elif AVGKIND == 5
+//       p = new AvgProcessPhaseCorrelation(
+//           size, 0, ctx, sum, nowedge, nowedge, 1, 0, 5, 3, aConfig.BinarizeMask,
+//           aConfig.RotateMaskCC, aConfig.UseFilterVolume,
+//           aConfig.LinearInterpolation, modules);
+//       std::cout << "New Phase Correlation Method" << std::endl;
+// #elif AVGKIND == 9
+//       p = new AvgProcessOriginalBinaryKernels(
+//           size, 0, ctx, sum, nowedge, nowedge, 1, 0, 5, 3, aConfig.BinarizeMask,
+//           aConfig.RotateMaskCC, aConfig.UseFilterVolume,
+//           aConfig.LinearInterpolation, modules);
+//       std::cout << "Original Cuda Migrated to HIP with Binary Kernels" << std::endl;
+
+// #else
+//       p = new AvgProcessOriginal(size, 0, ctx, sum, nowedge, nowedge, 1, 0, 5,
+//                                  3, aConfig.BinarizeMask, aConfig.RotateMaskCC,
+//                                  aConfig.UseFilterVolume,
+//                                  aConfig.LinearInterpolation, modules);
+//       std::cout << "HIP Original C2C (no quality or performance improvements)" << std::endl;
+// #endif
+*/
+
+            maxVals_t v = p->execute(
+                part, nowedge, NULL, 0, 0, 0, (float)aConfig.HighPass,
+                (float)aConfig.LowPass, (float)aConfig.Sigma,
+                make_float3(0, 0, 0), aConfig.CouplePhiToPsi, false, 0);
+
+            int sx, sy, sz;
+            v.getXYZ(size, sx, sy, sz);
+
+#if VERBOSE >= 1
+            cout << mpi_part << ": "
+                 << "Found shift for symmetry: " << sx << ", " << sy << ", "
+                 << sz << v.ccVal << endl;
+            cout << mpi_part << ": "
+                 << "Found PSI/Theta for symmetry: " << v.rphi << " / "
+                 << v.rthe << " CC-Val: " << v.ccVal << endl;
+#endif
+
+            float3 shift;
+            shift.x = -sx;
+            shift.y = -sy;
+            shift.z = -sz;
+
+            aRotateKernelROT.SetTextureShift(temp);
+            aRotateKernelROT.do_shift(size, partRot, shift);
+
+            aRotateKernelROT.SetTexture(partRot);
+            aRotateKernelROT.do_rotate_improved(size, partReal, 0, -v.rphi, 0);
+
+            // sub.Add(partReal, partSum);
+            hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                               (float *)partReal.GetDevicePtr(),
+                               (float *)partSum.GetDevicePtr());
+            delete[] nowedge;
+            delete[] part;
+          }
+
+          if (aConfig.ApplySymmetry == Configuration::Symmetry_Shift) {
+            // partSum is now the averaged Particle without symmetry
+            aRotateKernelROT.SetTextureShift(partSum);
+
+            if (!(aConfig.ShiftSymmetryVector[0].x == 0 &&
+                  aConfig.ShiftSymmetryVector[0].y == 0 &&
+                  aConfig.ShiftSymmetryVector[0].z == 0)) {
+              aRotateKernelROT.do_shift(size, partReal,
+                                        aConfig.ShiftSymmetryVector[0]);
+              // sub.Add(partReal, partSum);
+              hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                                 (float *)partReal.GetDevicePtr(),
+                                 (float *)partSum.GetDevicePtr());
+
+              aRotateKernelROT.do_shift(size, partReal,
+                                        -aConfig.ShiftSymmetryVector[0]);
+              // sub.Add(partReal, partSum);
+              hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                                 (float *)partReal.GetDevicePtr(),
+                                 (float *)partSum.GetDevicePtr());
+            }
+
+            if (!(aConfig.ShiftSymmetryVector[1].x == 0 &&
+                  aConfig.ShiftSymmetryVector[1].y == 0 &&
+                  aConfig.ShiftSymmetryVector[1].z == 0)) {
+              aRotateKernelROT.do_shift(size, partReal,
+                                        aConfig.ShiftSymmetryVector[1]);
+              // sub.Add(partReal, partSum);
+              hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                                 (float *)partReal.GetDevicePtr(),
+                                 (float *)partSum.GetDevicePtr());
+
+              aRotateKernelROT.do_shift(size, partReal,
+                                        -aConfig.ShiftSymmetryVector[1]);
+              // sub.Add(partReal, partSum);
+              hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                                 (float *)partReal.GetDevicePtr(),
+                                 (float *)partSum.GetDevicePtr());
+            }
+
+            if (!(aConfig.ShiftSymmetryVector[2].x == 0 &&
+                  aConfig.ShiftSymmetryVector[2].y == 0 &&
+                  aConfig.ShiftSymmetryVector[2].z == 0)) {
+              aRotateKernelROT.do_shift(size, partReal,
+                                        aConfig.ShiftSymmetryVector[2]);
+              // sub.Add(partReal, partSum);
+              hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                                 (float *)partReal.GetDevicePtr(),
+                                 (float *)partSum.GetDevicePtr());
+
+              aRotateKernelROT.do_shift(size, partReal,
+                                        -aConfig.ShiftSymmetryVector[2]);
+              // sub.Add(partReal, partSum);
+              hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                                 (float *)partReal.GetDevicePtr(),
+                                 (float *)partSum.GetDevicePtr());
+            }
+          }
+
+          if (aConfig.ApplySymmetry == Configuration::Symmetry_Helical) {
+            partSum.CopyDeviceToHost(sum);
+            stringstream ss1;
+            string outName = aConfig.Path + aConfig.Reference[ref] + "noSymm_";
+            ss1 << outName << iter + 1 << ".em";
+            emwrite(ss1.str(), sum, size, size, size);
+
+            // partSum is now the averaged Particle without symmetry
+            aRotateKernelROT.SetTexture(partSum);
+
+            /*float rise = 22.92f / (49.0f / 3.0f) / (1.1f * 2);
+            float twist = 360.0f / 49.0f * 3.0f;*/
+            float rise = aConfig.HelicalRise;
+            float twist = aConfig.HelicalTwist;
+
+            for (int i = aConfig.HelicalRepeatStart;
+                 i <= aConfig.HelicalRepeatEnd; i++) {
+              if (i != 0) {
+                float angPhi = twist * i;
+                float shift = rise * i;
+
+                aRotateKernelROT.do_rotate_improved(size, partReal, angPhi, 0, 0);
+                aRotateKernelROT.SetTextureShift(partReal);
+                aRotateKernelROT.do_shift(size, partReal,
+                                          make_float3(0, 0, shift));
+                // sub.Add(partReal, partSum);
+                hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                                   (float *)partReal.GetDevicePtr(),
+                                   (float *)partSum.GetDevicePtr());
+              }
+            }
+          }
+
+          if (aConfig.ApplySymmetry == Configuration::Symmetry_Rotational) {
+            partSum.CopyDeviceToHost(sum);
+            stringstream ss1;
+            string outName = aConfig.Path + aConfig.Reference[ref] + "noSymm_";
+            ss1 << outName << iter + 1 << ".em";
+            emwrite(ss1.str(), sum, size, size, size);
+
+            // partSum is now the averaged Particle without symmetry
+            aRotateKernelROT.SetTexture(partSum);
+
+            float angle = aConfig.RotationalAngleStep;
+
+            for (int i = 1; i < aConfig.RotationalCount;
+                 i++) { // i=0 is the average itself{ // ToDo Is this correct
+                        // INDENT {}
+              float angPhi = angle * i;
+
+              aRotateKernelROT.do_rotate_improved(size, partReal, angPhi, 0, 0);
+              // sub.Add(partReal, partSum);
+              hipLaunchKernelGGL(add, grid, block, 0, stream, size,
+                                 (float *)partReal.GetDevicePtr(),
+                                 (float *)partSum.GetDevicePtr());
+            }
+          }
+
+          if (aConfig.BFactor != 0) {
+#if VERBOSE >= 1
+            cout << "Apply B-factor of " << aConfig.BFactor << "..." << endl;
+#endif
+            partSum.CopyDeviceToHost(sum);
+            stringstream ss1;
+            string outName = aConfig.Path + aConfig.Reference[ref] + "noBfac_";
+            ss1 << outName << iter + 1 << ".em";
+            emwrite(ss1.str(), sum, size, size, size);
+
+            // makecplx.MakeCplxWithSub(partSum, partCplx, 0);
+            hipLaunchKernelGGL(makeCplxWithSub, grid, block, 0, stream, size,
+                               (float *)partSum.GetDevicePtr(),
+                               (float2 *)partCplx.GetDevicePtr(), 0);
+
+            tempCplx.CopyDeviceToDevice(partCplx);
+#if defined(__HIP_PLATFORM_HCC__)
+            hipfftExecC2C(ffthandle, (hipfftComplex *)tempCplx.GetDevicePtr(),
+                          (hipfftComplex *)tempCplx.GetDevicePtr(),
+                          HIPFFT_FORWARD);
+#else
+            cufftExecC2C(ffthandle, (cufftComplex *)tempCplx.GetDevicePtr(),
+                         (cufftComplex *)tempCplx.GetDevicePtr(),
+                         CUFFT_FORWARD);
+#endif
+
+            // fft.FFTShift2(tempCplx, partCplx);
+            hipLaunchKernelGGL(fftshift2, grid, block, 0, stream, size,
+                               (float2 *)tempCplx.GetDevicePtr(),
+                               (float2 *)partCplx.GetDevicePtr());
+
+            float2 *particle = new float2[size * size * size];
+            partCplx.CopyDeviceToHost(particle);
+
+            for (int z = 0; z < size; z++) {
+              for (int y = 0; y < size; y++) {
+                for (int x = 0; x < size; x++) {
+                  int dz = (z - size / 2);
+                  int dy = (y - size / 2);
+                  int dx = (x - size / 2);
+
+                  float d = sqrt(dx * dx + dy * dy + dz * dz);
+
+                  d = round(d);
+                  d = d > (size / 2 - 1) ? (size / 2 - 1) : d;
+
+                  float res = size / (d + 1) * aConfig.PixelSize;
+
+                  float value = expf(-aConfig.BFactor / (4.0f * res * res));
+
+                  size_t idx = z * size * size + y * size + x;
+                  float2 pixel = particle[idx];
+                  pixel.x *= value;
+                  pixel.y *= value;
+                  particle[idx] = pixel;
+                }
+              }
+            }
+
+            partCplx.CopyHostToDevice(particle);
+            delete[] particle;
+            // fft.FFTShift2(partCplx, tempCplx);
+            hipLaunchKernelGGL(fftshift2, grid, block, 0, stream, size,
+                               (float2 *)partCplx.GetDevicePtr(),
+                               (float2 *)tempCplx.GetDevicePtr());
+
+            partCplx.CopyDeviceToDevice(tempCplx);
+#if defined(__HIP_PLATFORM_HCC__)
+            hipfftExecC2C(ffthandle, (hipfftComplex *)partCplx.GetDevicePtr(),
+                          (hipfftComplex *)partCplx.GetDevicePtr(),
+                          HIPFFT_BACKWARD);
+#else
+            cufftExecC2C(ffthandle, (cufftComplex *)partCplx.GetDevicePtr(),
+                         (cufftComplex *)partCplx.GetDevicePtr(),
+                         CUFFT_INVERSE);
+#endif
+
+            // mul.Mul(1.0f / (float)size / (float)size / (float)size,
+            // partCplx);
+            hipLaunchKernelGGL(mul, grid, block, 0, stream, size,
+                               1.0f / (float)size / (float)size / (float)size,
+                               (float2 *)partCplx.GetDevicePtr());
+
+            // makecplx.MakeReal(partCplx, partSum);
+            hipLaunchKernelGGL(makeReal, grid, block, 0, stream, size,
+                               (float2 *)partCplx.GetDevicePtr(),
+                               (float *)partSum.GetDevicePtr());
+          }
+
+          partSum.CopyDeviceToHost(sum);
+          stringstream ss1;
+          string outName = aConfig.Path + aConfig.Reference[ref];
+          ss1 << outName << iter + 1 << ".em";
+          emwrite(ss1.str(), sum, size, size, size);
+
+          partSumEven.CopyDeviceToHost(sum);
+          stringstream ss2;
+          ss2 << outName << iter + 1 << "Even.em";
+          emwrite(ss2.str(), sum, size, size, size);
+          partSumOdd.CopyDeviceToHost(sum);
+          stringstream ss3;
+          ss3 << outName << iter + 1 << "Odd.em";
+          emwrite(ss3.str(), sum, size, size, size);
+
+          partSumA.CopyDeviceToHost(sum);
+          stringstream ss5;
+          ss5 << outName << iter + 1 << "A.em";
+          emwrite(ss5.str(), sum, size, size, size);
+          partSumB.CopyDeviceToHost(sum);
+          stringstream ss4;
+          ss4 << outName << iter + 1 << "B.em";
+          emwrite(ss4.str(), sum, size, size, size);
+          delete[] sum;
+        }
+      }
+
+      if (mpi_part == 0) {
+        int *buffer = new int[aConfig.Reference.size()];
+        for (int mpi = 1; mpi < mpi_size; mpi++) {
+          MPI_Recv(buffer, aConfig.Reference.size(), MPI_INT, mpi, 0,
+                   MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+          for (size_t i = 0; i < aConfig.Reference.size(); i++) {
+            partsPerRef[i] += buffer[i];
+          }
+        }
+
+        int totalUsed = 0;
+        for (size_t i = 0; i < aConfig.Reference.size(); i++) {
+          totalUsed += partsPerRef[i];
+        }
+
+        // Output statistics:
+#if VERBOSE >= 1
+        cout << "Total particles:   " << totalCount << endl;
+        cout << "Ignored particles: " << totalCount - totalUsed << endl;
+        cout << "Used particles:    " << totalUsed << endl;
+
+        if (aConfig.MultiReference) {
+          for (size_t i = 0; i < aConfig.Reference.size(); i++) {
+            cout << "Used for ref" << i + 1 << ":     " << partsPerRef[i]
+                 << endl;
+          }
+        }
+#endif
+
+        delete[] buffer;
+      } else {
+        MPI_Send(&partsPerRef[0], aConfig.Reference.size(), MPI_INT, 0, 0,
+                 MPI_COMM_WORLD);
+      }
+
+#if defined(__HIP_PLATFORM_HCC__)
+      hipfftDestroy(ffthandle);
+#else
+      cufftDestroy(ffthandle);
+#endif
+    }
+
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    ////////////////////////////
+    /// End of Add particles ///
+    ////////////////////////////
 
 		
 	}
