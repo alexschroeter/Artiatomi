@@ -78,15 +78,16 @@ ADDPARTICLES_EXE = bin/AddParticles
 ##############################################################################
 # Default Makefile Target
 ##############################################################################
-#all: SubTomogramAverageMPI #Speedtest
 
 all: SubtomogramAverage AddParticles
+	@echo ""
+	@echo "Your executables have been created in bin/"
 
-SubtomogramAverage: $(SUBTOMOAVG_OBJ) $(OBJECTS) $(SubTomogramAverageMPI)
+SubtomogramAverage: $(SUBTOMOAVG_OBJ) $(OBJECTS) 
 	mkdir -p bin
 	$(CC) $(CFLAGS) $(SUBTOMOAVG_OBJ) $(OBJECTS) $(LIBDIRS) $(LIBS) -o $(SUBTOMOAVG_EXE)
 
-AddParticles: $(ADDPARTICLES_OBJ) $(OBJECTS) $(SubTomogramAverageMPI)
+AddParticles: $(ADDPARTICLES_OBJ) $(OBJECTS) 
 	mkdir -p bin
 	$(CC) $(CFLAGS) $(ADDPARTICLES_OBJ) $(OBJECTS) $(LIBDIRS) $(LIBS) -o $(ADDPARTICLES_EXE)
 
