@@ -46,7 +46,6 @@ LIBS=-lrocfft -lmpich -lcuda -lcudart -lcufft
 ##############################################################################
 COMMON= \
 src/subtomogramaverage/Kernels.cpp \
-src/subtomogramaverage/SubTomogramAverageMPI.cpp \
 src/subtomogramaverage/AvgProcess.cpp \
 src/io/EMFile.cpp \
 src/io/File.cpp \
@@ -65,70 +64,39 @@ src/hip/HipDeviceProperties.cpp \
 src/hip/HipException.cpp \
 src/hip/HipKernel.cpp \
 src/hip/HipTextures.cpp #\
-src/subtomogramaverage/SubTomogramAverageMPI.cpp
-
-COMMON2= \
-src/subtomogramaverage/Kernels.cpp \
-src/subtomogramaverage/AddParticles.cpp \
-src/subtomogramaverage/AvgProcess.cpp \
-src/io/EMFile.cpp \
-src/io/File.cpp \
-src/io/FileIOException.cpp \
-src/io/FileReader.cpp \
-src/io/FileWriter.cpp \
-src/io/Image.cpp \
-src/io/ImageConverterMethods.cpp \
-src/io/MotiveList.cpp \
-src/hip/HipVariables.cpp \
-src/config/Config.cpp \
-src/config/ConfigExceptions.cpp \
-src/hip/HipArrays.cpp \
-src/hip/HipContext.cpp \
-src/hip/HipDeviceProperties.cpp \
-src/hip/HipException.cpp \
-src/hip/HipKernel.cpp \
-src/hip/HipTextures.cpp
 
 OBJECTS=$(COMMON:.cpp=.o)
-OBJECTS2=$(COMMON2:.cpp=.o)
 
-# unused
-SOURCE+=$(EXECUTABLE:.cpp=.o)
+SUBTOMOAVG_SRC=src/subtomogramaverage/SubTomogramAverageMPI.cpp
+SUBTOMOAVG_OBJ=$(SUBTOMOAVG_SRC:.cpp=.o)
+SUBTOMOAVG_EXE=bin/SubTomogramAverageMPI
 
-EXECUTABLE=bin/SubTomogramAverageMPI
-
+ADDPARTICLES_SRC = src/subtomogramaverage/AddParticles.cpp
+ADDPARTICLES_OBJ = $(ADDPARTICLES_SRC:.cpp=.o)
+ADDPARTICLES_EXE = bin/AddParticles
 
 ##############################################################################
 # Default Makefile Target
 ##############################################################################
 #all: SubTomogramAverageMPI #Speedtest
 
-all: $(SOURCES) $(EXECUTABLE)
+all: SubtomogramAverage AddParticles
 
-SubtomogramAverage: $(OBJECTS)
+SubtomogramAverage: $(SUBTOMOAVG_OBJ) $(OBJECTS) $(SubTomogramAverageMPI)
 	mkdir -p bin
-	$(CC) $(CFLAGS) $(OBJECTS) $(LIBDIRS) $(LIBS) -o bin/SubTomogramAverageMPI
+	$(CC) $(CFLAGS) $(SUBTOMOAVG_OBJ) $(OBJECTS) $(LIBDIRS) $(LIBS) -o $(SUBTOMOAVG_EXE)
 
-AddParticles: $(OBJECTS2)
+AddParticles: $(ADDPARTICLES_OBJ) $(OBJECTS) $(SubTomogramAverageMPI)
 	mkdir -p bin
-	$(CC) $(CFLAGS) $(OBJECTS2) $(LIBDIRS) $(LIBS) -o bin/AddParticles
-
-$(EXECUTABLE): $(OBJECTS)
-	mkdir -p bin
-	$(CC) $(CFLAGS) $(OBJECTS) $(LIBDIRS) $(LIBS) -o $@
-
+	$(CC) $(CFLAGS) $(ADDPARTICLES_OBJ) $(OBJECTS) $(LIBDIRS) $(LIBS) -o $(ADDPARTICLES_EXE)
 
 .cpp.o:
 	$(CC) $(EXTRA) -c $(CFLAGS) $(INCLUDES) $< -o $@
 
+distclean: clean
+	rm -f $(ADDPARTICLES_EXE) $(SUBTOMOAVG_EXE)	
 
 clean:
 	rm -f $(OBJECTS)
-	rm -f $(SOURCE)
-	rm -f src/subtomogramaverage/SubTomogramAverageMPI.o
-	rm -f src/subtomogramaverage/SubTomogramAverageMPIBench.o
-	rm -f src/subtomogramaverage/Speedtest.o
-	rm -f src/subtomogramaverage/AvgProcess.o
-	rm -f bin/SubTomogramAverageMPI
-#	rm -f bin/Speedtest
-	
+	rm -f $(ADDPARTICLES_OBJ) $(SUBTOMOAVG_OBJ)
+
