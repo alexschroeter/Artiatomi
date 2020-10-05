@@ -46,7 +46,6 @@ LIBS=-lrocfft -lmpich -lcuda -lcudart -lcufft
 ##############################################################################
 COMMON= \
 src/subtomogramaverage/Kernels.cpp \
-src/subtomogramaverage/AvgProcess.cpp \
 src/io/EMFile.cpp \
 src/io/File.cpp \
 src/io/FileIOException.cpp \
@@ -56,7 +55,6 @@ src/io/Image.cpp \
 src/io/ImageConverterMethods.cpp \
 src/io/MotiveList.cpp \
 src/hip/HipVariables.cpp \
-src/config/Config.cpp \
 src/config/ConfigExceptions.cpp \
 src/hip/HipArrays.cpp \
 src/hip/HipContext.cpp \
@@ -67,13 +65,17 @@ src/hip/HipTextures.cpp #\
 
 OBJECTS=$(COMMON:.cpp=.o)
 
-SUBTOMOAVG_SRC=src/subtomogramaverage/SubTomogramAverageMPI.cpp
+SUBTOMOAVG_SRC= src/subtomogramaverage/Config.cpp src/subtomogramaverage/AvgProcess.cpp src/subtomogramaverage/SubTomogramAverageMPI.cpp
 SUBTOMOAVG_OBJ=$(SUBTOMOAVG_SRC:.cpp=.o)
 SUBTOMOAVG_EXE=bin/SubTomogramAverageMPI
 
-ADDPARTICLES_SRC = src/subtomogramaverage/AddParticles.cpp
+ADDPARTICLES_SRC = src/subtomogramaverage/Config.cpp src/subtomogramaverage/AvgProcess.cpp src/subtomogramaverage/AddParticles.cpp
 ADDPARTICLES_OBJ = $(ADDPARTICLES_SRC:.cpp=.o)
 ADDPARTICLES_EXE = bin/AddParticles
+
+EMSART_SRC = src/emsart/EmSart.cpp
+EMSART_OBJ = $(EMSART_SRC:.cpp=.o)
+EMSART_EXE = bin/EmSART
 
 ##############################################################################
 # Default Makefile Target
@@ -91,13 +93,17 @@ AddParticles: $(ADDPARTICLES_OBJ) $(OBJECTS)
 	mkdir -p bin
 	$(CC) $(CFLAGS) $(ADDPARTICLES_OBJ) $(OBJECTS) $(LIBDIRS) $(LIBS) -o $(ADDPARTICLES_EXE)
 
+EmSART: $(EMSART_OBJ) $(OBJECTS) 
+	mkdir -p bin
+	$(CC) $(CFLAGS) $(EMSART_OBJ) $(OBJECTS) $(LIBDIRS) $(LIBS) -o $(EMSART_EXE)
+
 .cpp.o:
 	$(CC) $(EXTRA) -c $(CFLAGS) $(INCLUDES) $< -o $@
 
 distclean: clean
-	rm -f $(ADDPARTICLES_EXE) $(SUBTOMOAVG_EXE)	
+	rm -f $(ADDPARTICLES_EXE) $(SUBTOMOAVG_EXE)	$(EMSART_EXE)
 
 clean:
 	rm -f $(OBJECTS)
-	rm -f $(ADDPARTICLES_OBJ) $(SUBTOMOAVG_OBJ)
+	rm -f $(ADDPARTICLES_OBJ) $(SUBTOMOAVG_OBJ) $(EMSART_OBJ)
 
