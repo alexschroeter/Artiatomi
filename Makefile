@@ -65,6 +65,44 @@ src/hip/HipTextures.cpp #\
 
 OBJECTS=$(COMMON:.cpp=.o)
 
+COMMON2= \
+src/emsart/hip/HipMissedStuff.cpp \
+src/emsart/hip/HipArrays.cpp \
+src/emsart/hip/HipContext.cpp \
+src/emsart/hip/HipDeviceProperties.cpp \
+src/emsart/hip/HipException.cpp \
+src/emsart/hip/HipKernel.cpp \
+src/emsart/hip/HipTextures.cpp \
+src/emsart/hip/HipVariables.cpp \
+src/emsart/io/CtfFile.cpp \
+src/emsart/io/Dm4File.cpp \
+src/emsart/io/File.cpp \
+src/emsart/io/ImageConverterMethods.cpp \
+src/emsart/io/Dm4FileStack.cpp \
+src/emsart/io/FileIOException.cpp \
+src/emsart/io/MPISource.cpp \
+src/emsart/io/Dm4FileTag.cpp \
+src/emsart/io/FileReader.cpp \
+src/emsart/io/MRCFile.cpp \
+src/emsart/io/Dm4FileTagDirectory.cpp \
+src/emsart/io/FileWriter.cpp \
+src/emsart/io/MarkerFile.cpp \
+src/emsart/io/EMFile.cpp \
+src/emsart/io/Image.cpp \
+src/emsart/io/writeBMP.cpp \
+src/emsart/utils/Config.cpp \
+src/emsart/utils/ConfigExceptions.cpp \
+src/emsart/utils/Matrix.cpp \
+src/emsart/utils/log.cpp \
+src/emsart/Kernels.cpp \
+src/emsart/Projection.cpp \
+src/emsart/utils/SimpleLogger.cpp \
+src/emsart/Volume.cpp \
+src/emsart/Reconstructor.cpp \
+src/emsart/NppEmulator.cpp
+
+OBJECTS2=$(COMMON2:.cpp=.o)
+
 SUBTOMOAVG_SRC= src/subtomogramaverage/Config.cpp src/subtomogramaverage/AvgProcess.cpp src/subtomogramaverage/SubTomogramAverageMPI.cpp
 SUBTOMOAVG_OBJ=$(SUBTOMOAVG_SRC:.cpp=.o)
 SUBTOMOAVG_EXE=bin/SubTomogramAverageMPI
@@ -93,9 +131,9 @@ AddParticles: $(ADDPARTICLES_OBJ) $(OBJECTS)
 	mkdir -p bin
 	$(CC) $(CFLAGS) $(ADDPARTICLES_OBJ) $(OBJECTS) $(LIBDIRS) $(LIBS) -o $(ADDPARTICLES_EXE)
 
-EmSART: $(EMSART_OBJ) $(OBJECTS) 
+EmSART: $(EMSART_OBJ) $(OBJECTS2) 
 	mkdir -p bin
-	$(CC) $(CFLAGS) $(EMSART_OBJ) $(OBJECTS) $(LIBDIRS) $(LIBS) -o $(EMSART_EXE)
+	$(CC) $(CFLAGS) $(EMSART_OBJ) $(OBJECTS2) $(LIBDIRS) $(LIBS) -o $(EMSART_EXE)
 
 .cpp.o:
 	$(CC) $(EXTRA) -c $(CFLAGS) $(INCLUDES) $< -o $@
