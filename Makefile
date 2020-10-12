@@ -39,7 +39,7 @@ LIBDIRS=-L/usr/lib/x86_64-linux-gnu -L/opt/rocm/lib -L/usr/local/cuda/lib64/
 ##############################################################################
 # Linking libraries
 ##############################################################################
-LIBS=-lrocfft -lmpich -lcuda -lcudart -lcufft
+LIBS=-lrocfft -lmpich -lcuda -lcudart -lcufft -lcudart -lnppial -lnppist -lnppitc -lnppidei -lnppig
 
 ##############################################################################
 # These are all the common sources
@@ -66,40 +66,58 @@ src/hip/HipTextures.cpp #\
 OBJECTS=$(COMMON:.cpp=.o)
 
 COMMON2= \
-src/emsart/hip/HipMissedStuff.cpp \
-src/emsart/hip/HipArrays.cpp \
-src/emsart/hip/HipContext.cpp \
-src/emsart/hip/HipDeviceProperties.cpp \
-src/emsart/hip/HipException.cpp \
-src/emsart/hip/HipKernel.cpp \
-src/emsart/hip/HipTextures.cpp \
-src/emsart/hip/HipVariables.cpp \
-src/emsart/io/CtfFile.cpp \
-src/emsart/io/Dm4File.cpp \
-src/emsart/io/File.cpp \
-src/emsart/io/ImageConverterMethods.cpp \
-src/emsart/io/Dm4FileStack.cpp \
-src/emsart/io/FileIOException.cpp \
+src/emsart/CudaHelpers/CudaArrays.cpp \
+src/emsart/CudaHelpers/CudaContext.cpp \
+src/emsart/CudaHelpers/CudaDeviceProperties.cpp \
+src/emsart/CudaHelpers/CudaException.cpp \
+src/emsart/CudaHelpers/CudaKernel.cpp \
+src/emsart/CudaHelpers/CudaTextures.cpp \
+src/emsart/CudaHelpers/CudaVariables.cpp \
+src/emsart/CudaHelpers/CudaSurfaces.cpp \
+src/emsart/FileIO/CtfFile.cpp \
+src/emsart/FileIO/Dm3File.cpp \
+src/emsart/FileIO/Dm3FileTag.cpp \
+src/emsart/FileIO/Dm3FileTagDirectory.cpp \
+src/emsart/FileIO/Dm4File.cpp \
+src/emsart/FileIO/Dm4FileTag.cpp \
+src/emsart/FileIO/Dm4FileTagDirectory.cpp \
+src/emsart/FileIO/EmFile.cpp \
+src/emsart/FileIO/File.cpp \
+src/emsart/FileIO/FileIOException.cpp \
+src/emsart/FileIO/FileReader.cpp \
+src/emsart/FileIO/FileWriter.cpp \
+src/emsart/FileIO/ImageBase.cpp \
+src/emsart/FileIO/ImodFiducialFile.cpp \
+src/emsart/FileIO/MarkerFile.cpp \
+src/emsart/FileIO/MDocFile.cpp \
+src/emsart/FileIO/MotiveList.cpp \
+src/emsart/FileIO/MovieStack.cpp \
+src/emsart/FileIO/MRCFile.cpp \
+src/emsart/FileIO/SERFile.cpp \
+src/emsart/FileIO/ShiftFile.cpp \
+src/emsart/FileIO/SimpleFileList.cpp \
+src/emsart/FileIO/SingleFrame.cpp \
+src/emsart/FileIO/TIFFFile.cpp \
+src/emsart/FileIO/TiltSeries.cpp \
+src/emsart/FileIO/Volume.cpp \
+src/emsart/Minimization/levmar.cpp \
+src/emsart/FilterGraph/Matrix.cpp \
+src/emsart/FilterGraph/PointF.cpp \
+src/emsart/FilterGraph/FilterSize.cpp \
+src/emsart/FilterGraph/FilterROI.cpp \
+src/emsart/FilterGraph/FilterPoint2D.cpp \
 src/emsart/io/MPISource.cpp \
-src/emsart/io/Dm4FileTag.cpp \
-src/emsart/io/FileReader.cpp \
-src/emsart/io/MRCFile.cpp \
-src/emsart/io/Dm4FileTagDirectory.cpp \
-src/emsart/io/FileWriter.cpp \
-src/emsart/io/MarkerFile.cpp \
-src/emsart/io/EMFile.cpp \
-src/emsart/io/Image.cpp \
+src/emsart/io/FileSource.cpp \
 src/emsart/io/writeBMP.cpp \
 src/emsart/utils/Config.cpp \
+src/emsart/utils/CudaConfig.cpp \
 src/emsart/utils/ConfigExceptions.cpp \
-src/emsart/utils/Matrix.cpp \
 src/emsart/utils/log.cpp \
+src/emsart/utils/SimpleLogger.cpp \
 src/emsart/Kernels.cpp \
 src/emsart/Projection.cpp \
-src/emsart/utils/SimpleLogger.cpp \
 src/emsart/Volume.cpp \
-src/emsart/Reconstructor.cpp \
-src/emsart/NppEmulator.cpp
+src/emsart/Reconstructor.cpp 
 
 OBJECTS2=$(COMMON2:.cpp=.o)
 

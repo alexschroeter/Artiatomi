@@ -1,32 +1,54 @@
+//  Copyright (c) 2018, Michael Kunz and Frangakis Lab, BMLS,
+//  Goethe University, Frankfurt am Main.
+//  All rights reserved.
+//  http://kunzmi.github.io/Artiatomi
+//  
+//  This file is part of the Artiatomi package.
+//  
+//  Artiatomi is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation, either version 3 of the License, or
+//  (at your option) any later version.
+//  
+//  Artiatomi is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//  
+//  You should have received a copy of the GNU General Public License
+//  along with Artiatomi. If not, see <http://www.gnu.org/licenses/>.
+//  
+////////////////////////////////////////////////////////////////////////
+
+
 //#define USE_MPI
 #ifdef USE_MPI
 #include <mpi.h>
 #endif
-#include "default.h"
+#include "EmSartDefault.h"
 #include "Projection.h"
 #include "Volume.h"
 //#include "Kernels.h"
-#include "hip/CudaArrays.h"
-#include "hip/CudaContext.h"
-#include "hip/CudaTextures.h"
-#include "hip/CudaKernel.h"
-#include "hip/CudaDeviceProperties.h"
+
+#include <CudaContext.h>
 #include "utils/Config.h"
 //#include "utils/CudaConfig.h"
-#include "utils/Matrix.h"
-#include "io/Dm4FileStack.h"
-#include "io/MRCFile.h"
+//#include "utils/Matrix.h"
+//#include "io/Dm4FileStack.h"
+//#include "io/MRCFile.h"
+#include "io/FileSource.h"
 #ifdef USE_MPI
 #include "io/MPISource.h"
 #endif
-#include "io/MarkerFile.h"
+#include <MarkerFile.h>
 #include "io/writeBMP.h"
-#include "io/mrcHeader.h"
-#include "io/emHeader.h"
-#include "io/CtfFile.h"
-#include "io/MotiveListe.h"
-#include "io/ShiftFile.h"
+//#include "io/mrcHeader.h"
+//#include "io/emHeader.h"
+#include <CtfFile.h>
+#include <MotiveListe.h>
+#include <ShiftFile.h>
 #include <time.h>
+#include <cufft.h>
 #include <npp.h>
 //#include "CudaKernelBinarys.h"
 #include <algorithm>
@@ -278,30 +300,20 @@ int main(int argc, char* argv[])
 
 		printf("Using CUDA device %s\n", cuCtx->GetDeviceProperties()->GetDeviceName().c_str()); fflush(stdout);
 
-		printf("Available Memory on device: %i MB\n", cuCtx->GetFreeMemorySize() / 1024 / 1024); fflush(stdout);
+		printf("Available Memory on device: %llu MB\n", cuCtx->GetFreeMemorySize() / 1024 / 1024); fflush(stdout);
 
 		ProjectionSource* projSource;
 		//Load projection data file
 		if (mpi_part == 0)
 		{
-			if (aConfig.GetFileReadMode() == Configuration::Config::FRM_DM4)
+			if (aConfig.GetFileReadMode() == Configuration::Config::FRM_DM4 ||
+				aConfig.GetFileReadMode() == Configuration::Config::FRM_MRC)
 			{
-				projSource = new Dm4FileStack(aConfig.ProjectionFile);
 				printf("\nLoading projections...\n");
-				if (!projSource->OpenAndRead())
-				{
-					printf("Error: cannot read projections from %s.\n", aConfig.ProjectionFile.c_str());
-					WaitForInput(-1);
-				}
-				projSource->ReadHeaderInfo();
+				projSource = new FileSource(aConfig.ProjectionFile);
 
-				printf("Loaded %d dm4 projections.\n\n", projSource->DimZ);
-			}
-			else if (aConfig.GetFileReadMode() == Configuration::Config::FRM_MRC)
-			{
-				//Load projection data file
-				projSource = new MRCFile(aConfig.ProjectionFile);
-				((MRCFile*)projSource)->OpenAndReadHeader();
+
+				printf("Loaded %d projections.\n\n", projSource->GetProjectionCount());
 			}
 			else
 			{
@@ -312,11 +324,11 @@ int main(int argc, char* argv[])
 			}
 
 #ifdef USE_MPI
-			float pixelsize = projSource->PixelSize[0];
+			float pixelsize = projSource->GetPixelSize();
 			int dims[4];
-			dims[0] = projSource->DimX;
-			dims[1] = projSource->DimY;
-			dims[2] = projSource->DimZ;
+			dims[0] = projSource->GetWidth();
+			dims[1] = projSource->GetHeight();
+			dims[2] = projSource->GetProjectionCount();
 			dims[3] = *((int*)&pixelsize);
 			MPI_Bcast(dims, 4, MPI_INT, 0, MPI_COMM_WORLD);
 #endif
@@ -334,14 +346,16 @@ int main(int argc, char* argv[])
 		MarkerFile markers(aConfig.MarkerFile, aConfig.ReferenceMarker);
 
 		//Create projection object to handle projection data
-		Projection proj(projSource, &markers);
+		Projection proj(projSource, &markers, aConfig.WBP_NoSART);
 
 		MotiveList ml(aConfig.MotiveList, aConfig.ScaleMotivelistPosition, aConfig.ScaleMotivelistShift);
-		
-		EMFile reconstructedVol(aConfig.OutVolumeFile);
+		ml.selectTomo(aConfig.TomogramIndex);
+		printf("%i\n", aConfig.TomogramIndex);
+
+		EmFile reconstructedVol(aConfig.OutVolumeFile);
 		reconstructedVol.OpenAndReadHeader();
-		reconstructedVol.ReadHeaderInfo();
-		dim3 volDims = make_dim3(reconstructedVol.DimX, reconstructedVol.DimY, reconstructedVol.DimZ);
+		//reconstructedVol.ReadHeaderInfo();
+		dim3 volDims = make_dim3(reconstructedVol.GetFileHeader().DimX, reconstructedVol.GetFileHeader().DimY, reconstructedVol.GetFileHeader().DimZ);
 
 		//Create volume dataset (host)
 		Volume<float> *volSubVol = NULL; //this is a subVol filled with zeros to reset the storage on GPU
@@ -383,8 +397,8 @@ int main(int argc, char* argv[])
 		size_t sizeDataType;
 		sizeDataType = sizeof(float);
 		
-		if (mpi_part == 0) printf("Memory space required by volume data: %i MB\n", aConfig.RecDimensions.x * aConfig.RecDimensions.y * aConfig.RecDimensions.z * sizeDataType / 1024 / 1024);
-		if (mpi_part == 0) printf("Memory space required by partial volume: %i MB\n", aConfig.RecDimensions.x * aConfig.RecDimensions.y * (size_t)subVolDim.z * sizeDataType / 1024 / 1024);
+		if (mpi_part == 0) printf("Memory space required by volume data: %llu MB\n", (size_t)aConfig.RecDimensions.x * (size_t)aConfig.RecDimensions.y * (size_t)aConfig.RecDimensions.z * sizeDataType / 1024 / 1024);
+		if (mpi_part == 0) printf("Memory space required by partial volume: %llu MB\n", (size_t)aConfig.RecDimensions.x * (size_t)aConfig.RecDimensions.y * (size_t)subVolDim.z * sizeDataType / 1024 / 1024);
 
 		//Load Kernels
 		KernelModuls modules(cuCtx);
@@ -425,8 +439,8 @@ int main(int argc, char* argv[])
 		//CudaArray3D vol_ArraySubVol(arrayFormat, aConfig.SizeSubVol, aConfig.SizeSubVol, aConfig.SizeSubVol, 1, 2);
 		//CudaTextureObject3D texObjSubVol(CU_TR_ADDRESS_MODE_CLAMP, CU_TR_ADDRESS_MODE_CLAMP, CU_TR_ADDRESS_MODE_CLAMP, CU_TR_FILTER_MODE_LINEAR, 0, &vol_ArraySubVol);
 
-		CUsurfref surfref;
-		cudaSafeCall(cuModuleGetSurfRef(&surfref, modules.modBP, "surfref"));
+		//CUsurfref surfref;
+		//cudaSafeCall(cuModuleGetSurfRef(&surfref, modules.modBP, "surfref"));
 		
 
 		
@@ -440,26 +454,27 @@ int main(int argc, char* argv[])
 		//proj.CreateProjectionIndexList(PLT_NORMAL, &projCount, &indexList);
 
 
-		if (mpi_part == 0)
-		{
-			printf("Projection index list:\n");
-			log << "Projection index list:" << endl;
-			for (uint i = 0; i < projCount; i++)
-			{
-				printf("%3d,", indexList[i]);
-				log << indexList[i];
-				if (i < projCount - 1)
-					log << ", ";
-			}
-			log << endl;
-			printf("\b \n\n");
+		if (mpi_part == 0) {
+            printf("Projection index list:\n");
+            log << "Projection index list:" << endl;
+            for (int i = 0; i < projCount; i++) {
+                printf("%3d,", indexList[i]);
+                log << indexList[i];
+                if (i < projCount - 1)
+                    log << ", ";
+            }
+            log << endl;
+            printf("\b \n\n");
 
-		}
+        }
+
 
 		Reconstructor reconstructor(aConfig, proj, projSource, markers, *defocus, modules, mpi_part, mpi_size);
 
 
-		if (mpi_part == 0) printf("Free Memory on device after allocations: %i MB\n", cuCtx->GetFreeMemorySize() / 1024 / 1024);
+
+
+		if (mpi_part == 0) printf("Free Memory on device after allocations: %llu MB\n", cuCtx->GetFreeMemorySize() / 1024 / 1024);
 		/////////////////////////////////////
 		/// Filter Projections
 		/////////////////////////////////////
@@ -489,12 +504,12 @@ int main(int argc, char* argv[])
 				log << "Normalizing projections by mean [im = (im - mean) / mean]" << endl;
 
 			log << "Scaling projection values by: " << aConfig.ProjectionScaleFactor << endl;
-			log << "Pixel size is: " << proj.GetPixelSize(0) << " nm" << endl;
+			log << "Pixel size is: " << proj.GetPixelSize() << " nm" << endl;
 
 			log << "Projection statistics:" << endl;
 
 			printf("\r\n");
-			for (int i = 0; i < projSource->DimZ; i++)
+			for (int i = 0; i < projSource->GetProjectionCount(); i++)
 			{
 				if (!markers.CheckIfProjIndexIsGood(i))
 				{
@@ -509,15 +524,13 @@ int main(int argc, char* argv[])
 				//projSource->GetProjection(i) always points to an array with an element size of 4 bytes,
 				//Even if original data is stored in shorts! We can therfor cast data and keep the same pointer.
 				char* imgUS = projSource->GetProjection(i);
-				float tilt = projSource->TiltAlpha[i];
-				float weight = 1.0f / cos(tilt / 180.0f * M_PI);
-
+				
 				//Check if data format is supported
-				if (projSource->GetDataType() != FDT_SHORT &&
-					projSource->GetDataType() != FDT_USHORT &&
-					projSource->GetDataType() != FDT_INT &&
-					projSource->GetDataType() != FDT_UINT &&
-					projSource->GetDataType() != FDT_FLOAT)
+				if (projSource->GetDataType() != DT_SHORT &&
+					projSource->GetDataType() != DT_USHORT &&
+					projSource->GetDataType() != DT_INT &&
+					projSource->GetDataType() != DT_UINT &&
+					projSource->GetDataType() != DT_FLOAT)
 				{
 					cerr << "Projections have wrong data type: supported types are: short, ushort, int, uint and float.";
 					log << SimpleLogger::LOG_ERROR;
@@ -540,7 +553,7 @@ int main(int argc, char* argv[])
 		/////////////////////////////////////
 
 
-		if (mpi_part == 0)printf("\nPixel size is: %f nm, Cs: %.2f mm, Voltage: %.2f kV\n", proj.GetPixelSize(0), aConfig.Cs, aConfig.Voltage);
+		if (mpi_part == 0)printf("\nPixel size is: %f nm, Cs: %.2f mm, Voltage: %.2f kV\n", proj.GetPixelSize(), aConfig.Cs, aConfig.Voltage);
 
 		int SIRTcount = aConfig.SIRTCount;
 		if (aConfig.WBP_NoSART)
@@ -578,7 +591,7 @@ int main(int argc, char* argv[])
 
 		ShiftFile sf(aConfig.ShiftInputFile);
 
-		float2 test = sf(1, 2);
+		//float2 test = sf(1, 2);
 
 		/*float2* extraShifts = new float2[projSource->DimZ * ml.DimY];
 		memset(extraShifts, 0, projSource->DimZ * ml.DimY * sizeof(float2));
@@ -596,9 +609,34 @@ int main(int argc, char* argv[])
 		//	//printf("Old shifts: %f, %f\n", s[i].x, s[i].y);
 		//	//proj.SetExtraShift(i, s[i]);
 		//}
+
+        // Compute mask for normalization and setup
+        int nLength = (int)aConfig.SizeSubVol * (int)aConfig.SizeSubVol * (int)aConfig.SizeSubVol;
+        int sumBufferSize;
+        float maskSum, maskedSum, maskedMean, maskedError, maskedStd;
+
+        CudaDeviceVariable *d_particle, *d_normBuffer, *d_normMask, *d_sumBuffer, *d_sum;
+        if (aConfig.NormalizeMRCParticle && (aConfig.FileFormat == Configuration::Config::FILE_SAVE_MODE::FSM_MRC || aConfig.FileFormat == Configuration::Config::FILE_SAVE_MODE::FSM_BOTH)){
+
+            nppSafeCall(nppsSumGetBufferSize_32f(nLength, &sumBufferSize));
+
+            d_sumBuffer = new CudaDeviceVariable(sumBufferSize);
+            float radius = aConfig.NormalizationRadius * aConfig.SizeSubVol * 0.5f;
+            d_normMask = new CudaDeviceVariable(nLength * sizeof(float));
+            d_normBuffer = new CudaDeviceVariable(nLength * sizeof(float));
+            d_particle = new CudaDeviceVariable(nLength * sizeof(float));
+            d_sum = new CudaDeviceVariable(sizeof(float));
+
+            SphericalMaskKernel sp(modules.modWBP, (int)aConfig.SizeSubVol);
+            sp(*d_normMask, radius);
+
+            maskSum = 0;
+            nppSafeCall(nppsSum_32f((Npp32f*)d_normMask->GetDevicePtr(), nLength, (Npp32f*)d_sum->GetDevicePtr(), (Npp8u*)d_sumBuffer->GetDevicePtr()));
+            d_sum->CopyDeviceToHost(&maskSum, sizeof(float));
+        }
 		
 		//Process particles in batches:
-		for (int batch = 0; batch < ml.DimY; batch += aConfig.BatchSize)
+		for (int batch = 0; batch < ml.GetParticleCount(); batch += aConfig.BatchSize)
 		{
 			//Reset all sub-volumes on GPU to zero:
 			for (size_t i = 0; i < aConfig.BatchSize; i += mpi_size)
@@ -624,7 +662,7 @@ int main(int argc, char* argv[])
 				for (int pInBatch = 0; pInBatch < aConfig.BatchSize; pInBatch += mpi_size)
 				{
 					int motlIdx = batch + pInBatch + mpi_part; //now we are on each node on the right index in motl! We should never see a NULL in the vectors!
-					if (motlIdx >= ml.DimY)
+					if (motlIdx >= ml.GetParticleCount())
 					{
 						continue; //make sure we won't pass beyond the end of the motivelist...
 					}
@@ -637,7 +675,9 @@ int main(int argc, char* argv[])
 					float3 shift = make_float3(m.x_Shift, m.y_Shift, m.z_Shift);
 					v->PositionInSpace(aConfig.VoxelSize, aConfig.VoxelSizeSubVol, *volReconstructed, posSubVol, shift);
 
-					float2 es = sf(index, motlIdx);// s[i * projCount + motlIdx];
+					// This tmp var is a little messy but this way ShiftFiles don't depend on CUDA
+					my_float2 tmp = sf(index, motlIdx);
+					float2 es = make_float2(tmp.x, tmp.y);// s[i * projCount + motlIdx];
 
 					float shiftLength = sqrtf(es.x * es.x + es.y * es.y);
 
@@ -667,7 +707,7 @@ int main(int argc, char* argv[])
 				reconstructor.CopyProjectionToDevice(SIRTBuffer[0]);
 
 				//Do Backprojection on vector data:
-				reconstructor.BackProjection(volReconstructed, vecVols, vecExtraShifts, vecArrays, surfref, index);
+				reconstructor.BackProjection(volReconstructed, vecVols, vecExtraShifts, vecArrays, index);
 			}
 
 			//Write all sub-volumes to disk:
@@ -675,23 +715,121 @@ int main(int argc, char* argv[])
 			for (int pInBatch = 0; pInBatch < aConfig.BatchSize; pInBatch += mpi_size)
 			{
 				int motlIdx = batch + pInBatch + mpi_part; //now we are on each node on the right index in motl! We should never see a NULL in the vectors!
-				if (motlIdx >= ml.DimY)
+				if (motlIdx >= ml.GetParticleCount())
 				{
 					continue; //make sure we won't pass beyond the end of the motivelist...
 				}
 
 				motive m = ml.GetAt(motlIdx);
 
-				vol_ArraySubVols[pInBatch + mpi_part]->CopyFromArrayToHost(volSubVolReconstructed->GetPtrToSubVolume(0));
+                vol_ArraySubVols[pInBatch + mpi_part]->CopyFromArrayToHost(volSubVolReconstructed->GetPtrToSubVolume(0));
+                string filename;
 
-				string filename = aConfig.SubVolPath;
+				if (aConfig.FileFormat == Configuration::Config::FILE_SAVE_MODE::FSM_EM || aConfig.FileFormat == Configuration::Config::FILE_SAVE_MODE::FSM_BOTH)
+				{
+                    filename = aConfig.SubVolPath;
+                    filename += m.GetIndexCoding(aConfig.NamingConv) + ".em";
+                    volSubVolReconstructed->Invert();
+                    emwrite(filename, volSubVolReconstructed->GetPtrToSubVolume(0), aConfig.SizeSubVol, aConfig.SizeSubVol, aConfig.SizeSubVol);
+				}
 
-				filename += m.GetIndexCoding(aConfig.NamingConv) + ".em";
-				volSubVolReconstructed->Invert();
-				emwrite(filename, volSubVolReconstructed->GetPtrToSubVolume(0), aConfig.SizeSubVol, aConfig.SizeSubVol, aConfig.SizeSubVol);
+				if (aConfig.FileFormat == Configuration::Config::FILE_SAVE_MODE::FSM_MRC || aConfig.FileFormat == Configuration::Config::FILE_SAVE_MODE::FSM_BOTH)
+                {
+				    if (aConfig.NormalizeMRCParticle){
+				        // Get reconstructed volumes
+				        d_particle->CopyHostToDevice(volSubVolReconstructed->GetPtrToSubVolume(0), nLength*sizeof(float));
+                        d_normBuffer->CopyHostToDevice(volSubVolReconstructed->GetPtrToSubVolume(0), nLength*sizeof(float));
 
+                        // Init
+                        maskedSum = 0;
+                        maskedMean = 0;
+                        maskedError = 0;
+                        maskedStd = 0;
+
+                        // Multiply with mask
+                        nppSafeCall(nppsMul_32f_I((Npp32f*)d_normMask->GetDevicePtr(), (Npp32f*)d_normBuffer->GetDevicePtr(), nLength));
+                        // Sum
+                        nppSafeCall(nppsSum_32f((Npp32f*)d_normBuffer->GetDevicePtr(), nLength, (Npp32f*)d_sum->GetDevicePtr() , (Npp8u*)d_sumBuffer->GetDevicePtr()));
+                        d_sum->CopyDeviceToHost(&maskedSum, sizeof(float));
+                        // Compute Mean in mask
+                        maskedMean = maskedSum / maskSum;
+
+                        // Subtract mean
+                        nppSafeCall(nppsSubC_32f_I(maskedMean, (Npp32f*)d_normBuffer->GetDevicePtr(), nLength));
+                        // Square
+                        nppSafeCall(nppsSqr_32f_I((Npp32f*)d_normBuffer->GetDevicePtr(), nLength));
+                        // Multiply mask
+                        nppSafeCall(nppsMul_32f_I((Npp32f*)d_normMask->GetDevicePtr(), (Npp32f*)d_normBuffer->GetDevicePtr(), nLength));
+                        // Sum
+                        nppSafeCall(nppsSum_32f((Npp32f*)d_normBuffer->GetDevicePtr(), nLength, (Npp32f*)d_sum->GetDevicePtr(), (Npp8u*)d_sumBuffer->GetDevicePtr()));
+                        d_sum->CopyDeviceToHost(&maskedError, sizeof(float));
+                        // Standard deviation
+                        maskedStd = sqrtf((1/(maskSum-1)) * maskedError);
+
+                        // Apply
+                        nppSafeCall(nppsSubC_32f_I(maskedMean, (Npp32f*)d_particle->GetDevicePtr(), nLength));
+                        nppSafeCall(nppsDivC_32f_I(maskedStd, (Npp32f*)d_particle->GetDevicePtr(), nLength));
+
+                        // Copy to host
+                        d_particle->CopyDeviceToHost(volSubVolReconstructed->GetPtrToSubVolume(0), nLength*sizeof(float));
+				    } else {
+				        // Copy to host
+                        vol_ArraySubVols[pInBatch + mpi_part]->CopyFromArrayToHost(volSubVolReconstructed->GetPtrToSubVolume(0));
+				    }
+
+				    // Invert MRC-Particle
+                    if (aConfig.InvertMRCParticle){
+                        volSubVolReconstructed->Invert();
+                    }
+
+                    filename = aConfig.SubVolPath;
+                    filename += m.GetIndexCoding(aConfig.NamingConv) + ".mrc";
+                    printf("Saving as %s\n", filename.c_str());
+
+                    std::ofstream* mVol = new std::ofstream();
+                    mVol->open(filename.c_str(), ios_base::out | ios_base::binary);
+                    if (!(mVol->is_open() && mVol->good()))
+                        printf("Cannot open File!\n");
+
+                    sizeDataType = sizeof(float);
+                    MrcHeader header;
+                    memset(&header, 0, sizeof(MrcHeader));
+                    int dimx = volSubVolReconstructed->GetDimension().x;
+                    int dimy = volSubVolReconstructed->GetDimension().x;
+                    int dimz = volSubVolReconstructed->GetDimension().x;
+
+                    header.NX = (int)dimx;
+                    header.NY = (int)dimy;
+                    header.NZ = (int)dimz;
+                    header.MODE = MRCMODE_F;
+                    //if (aConfig.FP16Volume && aConfig.WriteVolumeAsFP16)
+                    //    header.MODE = MRCMODE_HALF;
+
+                    header.NXSTART = 0;
+                    header.NYSTART = 0;
+                    header.NZSTART = 0;
+                    header.MX = (int)dimx;
+                    header.MY = (int)dimy;
+                    header.MZ = (int)dimz;
+
+                    header.Xlen = proj.GetPixelSize() * dimx * aConfig.VoxelSize.x * 10.0f;
+                    header.Ylen = proj.GetPixelSize() * dimy * aConfig.VoxelSize.y * 10.0f;
+                    header.Zlen = proj.GetPixelSize() * dimz * aConfig.VoxelSize.z * 10.0f;
+
+                    header.MAPC = MRCAXIS_X;
+                    header.MAPR = MRCAXIS_Y;
+                    header.MAPS = MRCAXIS_Z;
+                    mVol->write((char*)&header, sizeof(MrcHeader));
+                    mVol->flush();
+
+                    size_t dimI = dimx * dimy * dimz * sizeDataType;
+                    mVol->write((char*)volSubVolReconstructed->GetPtrToSubVolume(0), dimI);
+                    mVol->flush();
+
+                    mVol->close();
+                    delete mVol;
+				}
 			}
-			
 		}
 
 
@@ -703,6 +841,13 @@ int main(int argc, char* argv[])
 
 			if (mpi_part == 0) printf("Done\n");
 		}*/
+
+		if (aConfig.NormalizeMRCParticle){
+            delete d_particle;
+            delete d_normBuffer;
+            delete d_normMask;
+            delete d_sumBuffer;
+		}
 
 		stop = clock();
 		runtime = (double)(stop - start) / CLOCKS_PER_SEC;

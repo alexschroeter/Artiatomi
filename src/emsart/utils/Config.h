@@ -1,3 +1,26 @@
+//  Copyright (c) 2018, Michael Kunz and Frangakis Lab, BMLS,
+//  Goethe University, Frankfurt am Main.
+//  All rights reserved.
+//  http://kunzmi.github.io/Artiatomi
+//  
+//  This file is part of the Artiatomi package.
+//  
+//  Artiatomi is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation, either version 3 of the License, or
+//  (at your option) any later version.
+//  
+//  Artiatomi is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//  
+//  You should have received a copy of the GNU General Public License
+//  along with Artiatomi. If not, see <http://www.gnu.org/licenses/>.
+//  
+////////////////////////////////////////////////////////////////////////
+
+
 #ifndef CONFIG_H
 #define CONFIG_H
 
@@ -6,6 +29,7 @@
 #include <list>
 #include "ConfigExceptions.h"
 #include "../Kernels.h"
+#include "../FileIO/MotiveListe.h"
 
 using namespace std;
 
@@ -13,15 +37,6 @@ using namespace std;
 
 namespace Configuration
 {
-#ifdef SUBVOLREC_MODE
-	enum NamingConvention
-	{
-		NC_ParticleOnly, //Particle nr from line 4
-		NC_TomogramParticle //Tomogram nr from line 5 and particle nr from line 6
-	};
-#endif
-
-
 	//! Parse structured config files
 	/*!
 		Config files contains lines with name-value assignements in the form "<name> = <value>".
@@ -46,7 +61,8 @@ namespace Configuration
 		{
 			FSM_RAW,
 			FSM_EM,
-			FSM_MRC
+			FSM_MRC,
+			FSM_BOTH
 		};
 		enum CTF_MODE
 		{
@@ -64,14 +80,7 @@ namespace Configuration
 			PNM_STANDARD_DEV,
 			PNM_NONE
 		};
-#ifdef REFINE_MODE
-		enum GROUP_MODE
-		{
-			GM_BYGROUP,
-			GM_MAXDIST,
-			GM_MAXCOUNT
-		};
-#endif
+
 	    private:
 			//! Parse config file aConfigFile
 			/*!
@@ -84,7 +93,7 @@ namespace Configuration
 			bool logAllowed;
 
 		public:
-			vector<int>	HipDeviceIDs;
+			vector<int>	CudaDeviceIDs;
 			string	ProjectionFile;
 			string	OutVolumeFile;
 			string	MarkerFile;
@@ -122,7 +131,7 @@ namespace Configuration
 			float	ProjectionScaleFactor;
 			PROJ_NORMALIZATION_MODE ProjectionNormalization;
 			bool	WBP_NoSART;
-			WbpFilterMethod WBPFilter;
+			FilterMethod WBPFilter;
 			float	Cs;
 			float	Voltage;
 			float	MagAnisotropyAmount;
@@ -131,8 +140,13 @@ namespace Configuration
 			float	CTFSliceThickness;
 			bool	DebugImages;
 			bool	DownWeightTiltsForWBP;
+			bool	DoseWeighting;
+			vector<float> AccumulatedDose;
 			bool	SwitchCTFDirectionForIMOD;
-
+			bool	PhaseFlipOnly;
+			float	WienerFilterNoiseLevel;
+            bool LimitToNyquist;
+			
 #ifdef REFINE_MODE
 			int SizeSubVol;
 			float VoxelSizeSubVol;
@@ -140,13 +154,22 @@ namespace Configuration
 			float ScaleMotivelistShift;
 			float ScaleMotivelistPosition;
 			string Reference;
+			string ReferenceMask;
+			string VolumeMask;
 			int MaxShift;
 			string ShiftOutputFile;
-			GROUP_MODE GroupMode;
+			MotiveList::GroupMode_enum GroupMode;
 			int GroupSize;
 			float MaxDistance;
 			string CCMapFileName;
 			float SpeedUpDistance;
+			vector<string> SupportingReferences;
+			vector<string> SupportingMotiveLists;
+			float MaxDistanceSupport;
+			bool MultiPeakDetection;
+			int TomogramIndex;
+			bool DoPhaseCorrelation;
+			float PhaseCorrSigma;
 #endif
 
 #ifdef SUBVOLREC_MODE
@@ -159,7 +182,12 @@ namespace Configuration
 			string ShiftInputFile;
 			int BatchSize;
 			int MaxShift;
-			NamingConvention NamingConv;
+			MotiveList::NamingConvention_enum NamingConv;
+			int TomogramIndex;
+			FILE_SAVE_MODE FileFormat;
+			bool NormalizeMRCParticle;
+			float NormalizationRadius;
+			bool InvertMRCParticle;
 #endif
 
             static Config& GetConfig();
@@ -238,6 +266,10 @@ namespace Configuration
 			//! get float3 config entry; value is parsed using stringstream
 			// get float3 config entry; value is parsed using stringstream
 			vector<int> GetVectorInt(string aName);
+
+			//! get float3 config entry; value is parsed using stringstream
+			// get float3 config entry; value is parsed using stringstream
+			vector<float> GetVectorFloat(string aName);
 
 			//! get the symbol map (e.g. for iterating over all symbols)
 			// get the symbol map (e.g. for iterating over all symbols)

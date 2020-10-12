@@ -1,216 +1,291 @@
+//  Copyright (c) 2018, Michael Kunz and Frangakis Lab, BMLS,
+//  Goethe University, Frankfurt am Main.
+//  All rights reserved.
+//  http://kunzmi.github.io/Artiatomi
+//  
+//  This file is part of the Artiatomi package.
+//  
+//  Artiatomi is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation, either version 3 of the License, or
+//  (at your option) any later version.
+//  
+//  Artiatomi is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//  
+//  You should have received a copy of the GNU General Public License
+//  along with Artiatomi. If not, see <http://www.gnu.org/licenses/>.
+//  
+////////////////////////////////////////////////////////////////////////
+
+
 #ifndef KERNELS_H
 #define KERNELS_H
 
-#include "default.h"
-#include "hip/HipTextures.h"
-#include "hip/HipKernel.h"
-#include "hip/HipDeviceProperties.h"
+#include "EmSartDefault.h"
+#include "CudaHelpers/CudaArrays.h"
+#include "CudaHelpers/CudaContext.h"
+#include "CudaHelpers/CudaTextures.h"
+#include "CudaHelpers/CudaSurfaces.h"
+#include "CudaHelpers/CudaKernel.h"
+#include "CudaHelpers/CudaDeviceProperties.h"
 #include "Projection.h"
 #include "Volume.h"
-#include "hip_kernels/DeviceReconstructionParameters.h"
 
 
-class FPKernel : public Hip::HipKernel
+class FPKernel : public Cuda::CudaKernel
 {
 public:
-	FPKernel(hipModule_t aModule, dim3 aGridDim, dim3 aBlockDim);
-	FPKernel(hipModule_t aModule);
+	FPKernel(CUmodule aModule, dim3 aGridDim, dim3 aBlockDim);
+	FPKernel(CUmodule aModule);
 
-	float operator()(DeviceReconstructionConstantsCommon &param, int x, int y, Hip::HipPitchedDeviceVariable& projection, Hip::HipPitchedDeviceVariable& distMap, Hip::HipTextureObject3D& texObj);
-	float operator()(DeviceReconstructionConstantsCommon &param, int x, int y, Hip::HipPitchedDeviceVariable& projection, Hip::HipPitchedDeviceVariable& distMap, Hip::HipTextureObject3D& texObj, int2 roiMin, int2 roiMax);
+	float operator()(int x, int y, Cuda::CudaPitchedDeviceVariable& projection, Cuda::CudaPitchedDeviceVariable& distMap, Cuda::CudaTextureObject3D& texObj);
+	float operator()(int x, int y, Cuda::CudaPitchedDeviceVariable& projection, Cuda::CudaPitchedDeviceVariable& distMap, Cuda::CudaTextureObject3D& texObj, int2 roiMin, int2 roiMax);
 };
 
-class SlicerKernel : public Hip::HipKernel
+class SlicerKernel : public Cuda::CudaKernel
 {
 public:
-	SlicerKernel(hipModule_t aModule, dim3 aGridDim, dim3 aBlockDim);
-	SlicerKernel(hipModule_t aModule);
+	SlicerKernel(CUmodule aModule, dim3 aGridDim, dim3 aBlockDim);
+	SlicerKernel(CUmodule aModule);
 
-	float operator()(DeviceReconstructionConstantsCommon &param, int x, int y, Hip::HipPitchedDeviceVariable& projection, float tmin, float tmax, Hip::HipTextureObject3D& texObj);
-	float operator()(DeviceReconstructionConstantsCommon &param, int x, int y, Hip::HipPitchedDeviceVariable& projection, float tmin, float tmax, Hip::HipTextureObject3D& texObj, int2 roiMin, int2 roiMax);
+	float operator()(int x, int y, Cuda::CudaPitchedDeviceVariable& projection, float tmin, float tmax, Cuda::CudaTextureObject3D& texObj);
+	float operator()(int x, int y, Cuda::CudaPitchedDeviceVariable& projection, float tmin, float tmax, Cuda::CudaTextureObject3D& texObj, int2 roiMin, int2 roiMax);
 };
 
-class VolTravLengthKernel : public Hip::HipKernel
+class VolTravLengthKernel : public Cuda::CudaKernel
 {
 public:
-	VolTravLengthKernel(hipModule_t aModule, dim3 aGridDim, dim3 aBlockDim);
-	VolTravLengthKernel(hipModule_t aModule);
+	VolTravLengthKernel(CUmodule aModule, dim3 aGridDim, dim3 aBlockDim);
+	VolTravLengthKernel(CUmodule aModule);
 
-	float operator()(DeviceReconstructionConstantsCommon &param, int x, int y, Hip::HipPitchedDeviceVariable& distMap);
-	float operator()(DeviceReconstructionConstantsCommon &param, int x, int y, Hip::HipPitchedDeviceVariable& distMap, int2 roiMin, int2 roiMax);
+	float operator()(int x, int y, Cuda::CudaPitchedDeviceVariable& distMap);
+	float operator()(int x, int y, Cuda::CudaPitchedDeviceVariable& distMap, int2 roiMin, int2 roiMax);
 };
 
-class CompKernel : public Hip::HipKernel
+class CompKernel : public Cuda::CudaKernel
 {
 public:
-	CompKernel(hipModule_t aModule, dim3 aGridDim, dim3 aBlockDim);
-	CompKernel(hipModule_t aModule);
+	CompKernel(CUmodule aModule, dim3 aGridDim, dim3 aBlockDim);
+	CompKernel(CUmodule aModule);
 
-	float operator()(Hip::HipPitchedDeviceVariable& real_raw, Hip::HipPitchedDeviceVariable& virtual_raw, Hip::HipPitchedDeviceVariable& vol_distance_map, float realLength, float4 crop, float4 cropDim, float projValScale);
+	float operator()(Cuda::CudaPitchedDeviceVariable& real_raw, Cuda::CudaPitchedDeviceVariable& virtual_raw, Cuda::CudaPitchedDeviceVariable& vol_distance_map, float realLength, float4 crop, float4 cropDim, float projValScale);
 };
 
-class CropBorderKernel : public Hip::HipKernel
+class SubEKernel : public Cuda::CudaKernel
 {
 public:
-	CropBorderKernel(hipModule_t aModule, dim3 aGridDim, dim3 aBlockDim);
-	CropBorderKernel(hipModule_t aModule);
+    SubEKernel(CUmodule aModule, dim3 aGridDim, dim3 aBlockDim);
+    SubEKernel(CUmodule aModule);
 
-	float operator()(Hip::HipPitchedDeviceVariable& image, float2 cutLength, float2 dimLength, int2 p1, int2 p2, int2 p3, int2 p4);
+    float operator()(Cuda::CudaPitchedDeviceVariable& real_raw, Cuda::CudaPitchedDeviceVariable& error, Cuda::CudaPitchedDeviceVariable& vol_distance_map);
 };
 
-class BPKernel : public Hip::HipKernel
+class CropBorderKernel : public Cuda::CudaKernel
 {
 public:
-	BPKernel(hipModule_t aModule, dim3 aGridDim, dim3 aBlockDim, bool fp16);
-	BPKernel(hipModule_t aModule, bool fp16);
+	CropBorderKernel(CUmodule aModule, dim3 aGridDim, dim3 aBlockDim);
+	CropBorderKernel(CUmodule aModule);
 
-	float operator()(DeviceReconstructionConstantsCommon &param, int proj_x, int proj_y, float lambda, int maxOverSample, float maxOverSampleInv, Hip::HipPitchedDeviceVariable& img, float distMin, float distMax, hipSurfaceObject_t surfObj, Hip::HipTextureObject2D texObj );
+	float operator()(Cuda::CudaPitchedDeviceVariable& image, float2 cutLength, float2 dimLength, int2 p1, int2 p2, int2 p3, int2 p4);
 };
 
-class CTFKernel : public Hip::HipKernel
+class BPKernel : public Cuda::CudaKernel
 {
 public:
-	CTFKernel(hipModule_t aModule, dim3 aGridDim, dim3 aBlockDim);
-	CTFKernel(hipModule_t aModule);
+	BPKernel(CUmodule aModule, dim3 aGridDim, dim3 aBlockDim, bool fp16);
+	BPKernel(CUmodule aModule, bool fp16);
 
-	//float operator()(HipPitchedDeviceVariable& ctf, float defocus, bool absolute)
-	float operator()( DeviceReconstructionConstantsCtf &param, Hip::HipDeviceVariable& ctf, float defocusMin, float defocusMax, float angle, bool absolute, size_t stride, float4 betaFac);
+    float operator()(int proj_x, int proj_y, float lambda, int maxOverSample, float maxOverSampleInv, Cuda::CudaTextureObject2D& img, Cuda::CudaSurfaceObject3D& surf,float distMin, float distMax);
 };
 
-class CopyToSquareKernel : public Hip::HipKernel
+class CTFKernel : public Cuda::CudaKernel
 {
 public:
-	CopyToSquareKernel(hipModule_t aModule, dim3 aGridDim, dim3 aBlockDim);
-	CopyToSquareKernel(hipModule_t aModule);
+	CTFKernel(CUmodule aModule, dim3 aGridDim, dim3 aBlockDim);
+	CTFKernel(CUmodule aModule);
 
-	float operator()(Hip::HipPitchedDeviceVariable& aIn, int maxsize, Hip::HipDeviceVariable& aOut, int borderSizeX, int borderSizeY, bool mirrorY, bool fillZero);
+	//float operator()(CudaPitchedDeviceVariable& ctf, float defocus, bool absolute)
+	float operator()(Cuda::CudaDeviceVariable& ctf, float defocusMin, float defocusMax, float angle, bool applyForFP, bool phaseFlipOnly, float WienerFilterNoiseLevel, size_t stride, float4 betaFac);
 };
 
-class SamplesToCoefficients2DX : public Hip::HipKernel
+class CopyToSquareKernel : public Cuda::CudaKernel
 {
 public:
-	SamplesToCoefficients2DX(hipModule_t aModule, dim3 aGridDim, dim3 aBlockDim);
+	CopyToSquareKernel(CUmodule aModule, dim3 aGridDim, dim3 aBlockDim);
+	CopyToSquareKernel(CUmodule aModule);
 
-	float operator()(Hip::HipPitchedDeviceVariable& image);
-};
-
-class SamplesToCoefficients2DY : public Hip::HipKernel
-{
-public:
-	SamplesToCoefficients2DY(hipModule_t aModule, dim3 aGridDim, dim3 aBlockDim);
-
-	float operator()(Hip::HipPitchedDeviceVariable& image);
+	float operator()(Cuda::CudaPitchedDeviceVariable& aIn, int maxsize, Cuda::CudaDeviceVariable& aOut, int borderSizeX, int borderSizeY, bool mirrorY, bool fillZero);
 };
 
 
 
-class ConvVolKernel : public Hip::HipKernel
+class ConvVolKernel : public Cuda::CudaKernel
 {
 public:
-	ConvVolKernel(hipModule_t aModule, dim3 aGridDim, dim3 aBlockDim);
-	ConvVolKernel(hipModule_t aModule);
+	ConvVolKernel(CUmodule aModule, dim3 aGridDim, dim3 aBlockDim);
+	ConvVolKernel(CUmodule aModule);
 
-    float operator()(DeviceReconstructionConstantsCommon &param, Hip::HipPitchedDeviceVariable& img, unsigned int z, hipSurfaceObject_t surfObj);
+    float operator()(Cuda::CudaPitchedDeviceVariable& img, Cuda::CudaSurfaceObject3D& surf, unsigned int z);
 };
 
-class ConvVol3DKernel : public Hip::HipKernel
+class ConvVol3DKernel : public Cuda::CudaKernel
 {
 public:
-	ConvVol3DKernel(hipModule_t aModule, dim3 aGridDim, dim3 aBlockDim);
-	ConvVol3DKernel(hipModule_t aModule);
+	ConvVol3DKernel(CUmodule aModule, dim3 aGridDim, dim3 aBlockDim);
+	ConvVol3DKernel(CUmodule aModule);
 
-	float operator()(DeviceReconstructionConstantsCommon &param, Hip::HipPitchedDeviceVariable& img, hipSurfaceObject_t surfObj);
-};
-
-
-
-class WbpWeightingKernel : public Hip::HipKernel
-{
-public:
-	WbpWeightingKernel(hipModule_t aModule, dim3 aGridDim, dim3 aBlockDim);
-	WbpWeightingKernel(hipModule_t aModule);
-
-	float operator()(Hip::HipDeviceVariable& img, size_t stride, unsigned int pixelcount, float psiAngle, WbpFilterMethod  fm);
-};
-
-class FourFilterKernel : public Hip::HipKernel
-{
-public:
-	FourFilterKernel(hipModule_t aModule, dim3 aGridDim, dim3 aBlockDim);
-	FourFilterKernel(hipModule_t aModule);
-
-	float operator()(Hip::HipDeviceVariable& img, size_t stride, int pixelcount, float lp, float hp, float lps, float hps);
-};
-
-class ConjKernel : public Hip::HipKernel
-{
-public:
-	ConjKernel(hipModule_t aModule, dim3 aGridDim, dim3 aBlockDim);
-	ConjKernel(hipModule_t aModule);
-
-	float operator()(Hip::HipDeviceVariable& img1, Hip::HipPitchedDeviceVariable& img2, size_t stride, int pixelcount);
-};
-
-class MaxShiftKernel : public Hip::HipKernel
-{
-public:
-	MaxShiftKernel(hipModule_t aModule, dim3 aGridDim, dim3 aBlockDim);
-	MaxShiftKernel(hipModule_t aModule);
-
-	float operator()(Hip::HipDeviceVariable& img1, size_t stride, int pixelcount, int maxShift);
+	float operator()(Cuda::CudaPitchedDeviceVariable& img, Cuda::CudaSurfaceObject3D& surf);
 };
 
 
-
-
-namespace kernels
-{  
-
-template<class TVol>
-DeviceReconstructionConstantsCommon GetReconstructionParameters( Volume<TVol>& vol, Projection& proj, int index, int subVol, Matrix<float>& m, Matrix<float>& mInv)
+enum FilterMethod
 {
-  //Set reconstruction parameters 
-  DeviceReconstructionConstantsCommon p;  
-  p.volumeBBoxRcp       = vol.GetSubVolumeBBoxRcp(subVol);
-  p.volumeDim           = vol.GetSubVolumeDimension(subVol);
-  p.volumeDim_x_quarter = (int)vol.GetDimension().x / 4;
-  p.volumeDimComplete   = vol.GetDimension();  
-  p.voxelSize           = vol.GetVoxelSize();    
-  proj.GetDetectorMatrix(index, (float*) &p.DetectorMatrix, 1);
-  p.bBoxMin         = vol.GetSubVolumeBBoxMin(subVol);
-  p.bBoxMax         = vol.GetSubVolumeBBoxMax(subVol);
-  p.bBoxMinComplete = vol.GetVolumeBBoxMin();
-  p.bBoxMaxComplete = vol.GetVolumeBBoxMax();
-  p.detektor = proj.GetPosition(index);
-  p.uPitch   = proj.GetPixelUPitch(index);
-  p.vPitch   = proj.GetPixelVPitch(index);
-  p.projNorm = proj.GetNormalVector(index);
-  p.zShiftForPartialVolume = 0;//vol.GetSubVolumeZShift(subVol);
-  //Magnification anisotropy  
-  p.magAniso = *(float3x3*) m.GetData();
-  p.magAnisoInv = *(float3x3*) mInv.GetData();
+	FM_RAMP,
+	FM_EXACT,
+	FM_CONTRAST2,
+	FM_CONTRAST10,
+	FM_CONTRAST30
+};
 
-  // ray direction == normal to the projection plane,  +-sign is not important
-  // t coordinate will be a coordinate along the ray 
-  const float3 &ray = p.projNorm;  
+class WbpWeightingKernel : public Cuda::CudaKernel
+{
+public:
+	WbpWeightingKernel(CUmodule aModule, dim3 aGridDim, dim3 aBlockDim);
+	WbpWeightingKernel(CUmodule aModule);
 
-  float3 tGradient; // == dt/dx dt/dy dt/dz
-  
-  if( fabs(ray.x)<1.e-4 ){
-    tGradient.x = (ray.x>=0) ?1.e4 : -1.e4;    
-  } else tGradient.x = 1.0 / (double) ray.x;
-  if( fabs(ray.y)<1.e-4 ){
-    tGradient.y = (ray.y>=0) ?1.e4 : -1.e4;
-  } else tGradient.y = 1.0 / (double) ray.y;
-  if( fabs(ray.z)<1.e-4 ){
-    tGradient.z = (ray.z>=0) ?1.e4 : -1.e4;
-  } else tGradient.z = 1.0 / (double) ray.z;
+	float operator()(Cuda::CudaDeviceVariable& img, size_t stride, unsigned int pixelcount, float psiAngle, FilterMethod fm, int proj_index, int projectionCount, float thickness, Cuda::CudaDeviceVariable& tiltAngles);
+};
 
-  p.tGradient = tGradient;
+class FourFilterKernel : public Cuda::CudaKernel
+{
+public:
+	FourFilterKernel(CUmodule aModule, dim3 aGridDim, dim3 aBlockDim);
+	FourFilterKernel(CUmodule aModule);
 
-  return p;
-}
+	float operator()(Cuda::CudaDeviceVariable& img, size_t stride, int pixelcount, float lp, float hp, float lps, float hps);
+};
 
-} // namespace
+class DoseWeightingKernel : public Cuda::CudaKernel
+{
+public:
+	DoseWeightingKernel(CUmodule aModule, dim3 aGridDim, dim3 aBlockDim);
+	DoseWeightingKernel(CUmodule aModule);
+
+	float operator()(Cuda::CudaDeviceVariable& img, size_t stride, int pixelcount, float dose, float pixelSizeInA);
+};
+
+class ConjKernel : public Cuda::CudaKernel
+{
+public:
+	ConjKernel(CUmodule aModule, dim3 aGridDim, dim3 aBlockDim);
+	ConjKernel(CUmodule aModule);
+
+	float operator()(Cuda::CudaDeviceVariable& img1, Cuda::CudaPitchedDeviceVariable& img2, size_t stride, int pixelcount);
+};
+
+class PCKernel : public Cuda::CudaKernel
+{
+public:
+    PCKernel(CUmodule aModule, dim3 aGridDim, dim3 aBlockDim);
+    PCKernel(CUmodule aModule);
+
+    float operator()(Cuda::CudaDeviceVariable& img1, Cuda::CudaPitchedDeviceVariable& img2, size_t stride, int pixelcount);
+};
+
+class MaxShiftKernel : public Cuda::CudaKernel
+{
+public:
+	MaxShiftKernel(CUmodule aModule, dim3 aGridDim, dim3 aBlockDim);
+	MaxShiftKernel(CUmodule aModule);
+
+	float operator()(Cuda::CudaDeviceVariable& img1, size_t stride, int pixelcount, int maxShift);
+};
+
+class MaxShiftWeightedKernel : public Cuda::CudaKernel
+{
+public:
+	MaxShiftWeightedKernel(CUmodule aModule, dim3 aGridDim, dim3 aBlockDim);
+	MaxShiftWeightedKernel(CUmodule aModule);
+
+	float operator()(Cuda::CudaDeviceVariable& img1, size_t stride, int pixelcount, int maxShift);
+};
+
+class FindPeakKernel : public Cuda::CudaKernel
+{
+public:
+	FindPeakKernel(CUmodule aModule, dim3 aGridDim, dim3 aBlockDim);
+	FindPeakKernel(CUmodule aModule);
+	//findPeak(float* img, size_t stride, char* maskInv, size_t strideMask, int pixelcount, float maxThreshold)
+	float operator()(Cuda::CudaDeviceVariable& img1, size_t stride, Cuda::CudaPitchedDeviceVariable& mask, int pixelcount, float maxThreshold);
+};
+
+class RotKernel : public Cuda::CudaKernel
+{
+private:
+	int size;
+	Cuda::CudaTextureArray3D volTexArray;
+	void computeRotMat(float phi, float psi, float theta, float rotMat[3][3]);
+
+public:
+	RotKernel(CUmodule aModule, int aSize);
+
+	float operator()(Cuda::CudaDeviceVariable& aVolOut, float phi, float psi, float theta);
+	void SetData(float* data);
+};
+
+class SphericalMaskKernel : public Cuda::CudaKernel
+{
+private:
+    int size;
+
+public:
+    SphericalMaskKernel(CUmodule aModule, int aSize);
+
+    float operator()(Cuda::CudaDeviceVariable& aVolOut, float radius);
+};
+
+class ApplyMaskKernel : public Cuda::CudaKernel
+{
+private:
+    int size;
+
+public:
+    ApplyMaskKernel(CUmodule aModule, int aSize);
+
+    float operator()(Cuda::CudaSurfaceObject3D& volume, Cuda::CudaDeviceVariable& mask, Cuda::CudaDeviceVariable& tempStore, int3 volmin, int3 volmax, int3 dimMask, int3 radiusMask, int3 centerInVol);
+};
+
+class RestoreVolumeKernel : public Cuda::CudaKernel
+{
+private:
+    int size;
+
+public:
+    RestoreVolumeKernel(CUmodule aModule, int aSize);
+
+    float operator()(Cuda::CudaSurfaceObject3D& volume, Cuda::CudaDeviceVariable& tempStore, int3 volmin, int3 volmax, int3 dimMask, int3 radiusMask, int3 centerInVol);
+};
+class DimBordersKernel : public Cuda::CudaKernel
+{
+public:
+	DimBordersKernel(CUmodule aModule, dim3 aGridDim, dim3 aBlockDim);
+	DimBordersKernel(CUmodule aModule);
+
+	float operator()(Cuda::CudaPitchedDeviceVariable& image, float4 crop, float4 cropDim);
+};
+
+
+void SetConstantValues(Cuda::CudaKernel& kernel, Volume<unsigned short>& vol, Projection& proj, int index, int subVol, Matrix<float>& m, Matrix<float>& mInv);
+
+void SetConstantValues(BPKernel& kernel, Volume<unsigned short>& vol, Projection& proj, int index, int subVol, Matrix<float>& m, Matrix<float>& mInv);
+
+void SetConstantValues(Cuda::CudaKernel& kernel, Volume<float>& vol, Projection& proj, int index, int subVol, Matrix<float>& m, Matrix<float>& mInv);
+
+void SetConstantValues(BPKernel& kernel, Volume<float>& vol, Projection& proj, int index, int subVol, Matrix<float>& m, Matrix<float>& mInv);
+
+void SetConstantValues(CTFKernel& kernel, Projection& proj, int index, float cs, float voltage);
 
 #endif //KERNELS_H
