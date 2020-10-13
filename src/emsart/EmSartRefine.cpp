@@ -29,7 +29,7 @@
 #include "Projection.h"
 #include "Volume.h"
 //#include "Kernels.h"
-#include <CudaContext.h>
+#include "CudaHelpers/CudaContext.h"
 #include "utils/Config.h"
 //#include "utils/CudaConfig.h"
 //#include "utils/Matrix.h"
@@ -39,13 +39,13 @@
 #ifdef USE_MPI
 #include "io/MPISource.h"
 #endif
-#include <MarkerFile.h>
+#include "FileIO/MarkerFile.h"
 #include "io/writeBMP.h"
 //#include "io/mrcHeader.h"
 //#include "io/emHeader.h"
-#include <CtfFile.h>
-#include <MotiveListe.h>
-#include <ShiftFile.h>
+#include "FileIO/CtfFile.h"
+#include "FileIO/MotiveListe.h"
+#include "FileIO/ShiftFile.h"
 #include <time.h>
 #include <cufft.h>
 #include <npp.h>
