@@ -2,7 +2,7 @@
 #define MOTIVELIST_H
 
 #include "EMFile.h"
-#include "../config/Config.h"
+#include "Config.h"
 
 struct motive
 {

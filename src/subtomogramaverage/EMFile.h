@@ -1,11 +1,11 @@
 #ifndef EMFILE_H
 #define EMFILE_H
 
-#include "IODefault.h"
-#include "emHeader.h"
-#include "FileReader.h"
-#include "FileWriter.h"
-#include "Image.h"
+#include "../io/IODefault.h"
+#include "../io/emHeader.h"
+#include "../io/FileReader.h"
+#include "../io/FileWriter.h"
+#include "../io/Image.h"
 
 using namespace std;
 

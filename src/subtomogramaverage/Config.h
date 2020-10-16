@@ -4,7 +4,7 @@
 #include "../default.h"
 #include <map>
 #include <list>
-#include "ConfigExceptions.h"
+#include "../config/ConfigExceptions.h"
 
 using namespace std;
 

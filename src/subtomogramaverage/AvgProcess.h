@@ -10,7 +10,7 @@
 
 #include "../default.h"
 #include "../hip/HipVariables.h"
-#include "../io/EMFile.h"
+#include "EMFile.h"
 //#include "../hip/HipKernel.h"
 //#include "../hip/HipArrays.h"
 //#include "../hip/HipTextures.h"

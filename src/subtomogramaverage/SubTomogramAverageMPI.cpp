@@ -59,9 +59,9 @@
 #include <argp.h>
 
 //#include "default.h"
-#include "../config/Config.h"
-#include "../io/EMFile.h"
-#include "../io/MotiveListe.h"
+#include "Config.h"
+#include "EMFile.h"
+#include "MotiveListe.h"
 #include "../HelperFunctions.h"
 #include "../hip/HipBasicKernel.h"
 #include "../hip/HipContext.h"
