@@ -46,14 +46,14 @@ LIBS=-lrocfft -lmpich -lcuda -lcudart -lcufft -lcudart -lnppial -lnppist -lnppit
 ##############################################################################
 COMMON= \
 src/subtomogramaverage/Kernels.cpp \
-src/io/EMFile.cpp \
+src/subtomogramaverage/EMFile.cpp \
 src/io/File.cpp \
 src/io/FileIOException.cpp \
 src/io/FileReader.cpp \
 src/io/FileWriter.cpp \
 src/io/Image.cpp \
 src/io/ImageConverterMethods.cpp \
-src/io/MotiveList.cpp \
+src/subtomogramaverage/MotiveList.cpp \
 src/hip/HipVariables.cpp \
 src/config/ConfigExceptions.cpp \
 src/hip/HipArrays.cpp \
@@ -158,7 +158,7 @@ AddParticles: $(ADDPARTICLES_OBJ) $(OBJECTS)
 	mkdir -p bin
 	$(CC) $(CFLAGS) $(ADDPARTICLES_OBJ) $(OBJECTS) $(LIBDIRS) $(LIBS) -o $(ADDPARTICLES_EXE)
 
-EmSART: EMSARTFLAG= 
+sEmSART: EMSARTFLAG= 
 EmSART: $(EMSART_OBJ) $(OBJECTS2)
 	mkdir -p bin
 	$(CC) $(CFLAGS) $(EMSART_OBJ) $(OBJECTS2) $(LIBDIRS) $(LIBS) -o $(EMSART_EXE)
