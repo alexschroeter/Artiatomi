@@ -52,25 +52,6 @@
 #include <npp.h>
 #include <algorithm>
 
-class KernelModuls
-{
-private:
-	bool compilerOutput;
-	bool infoOutput;
-
-public:
-	KernelModuls(Cuda::CudaContext* aCuCtx);
-	CUmodule modFP;
-	CUmodule modSlicer;
-	CUmodule modVolTravLen;
-	CUmodule modComp;
-	CUmodule modWBP;
-	CUmodule modBP;
-	CUmodule modCTF;
-	CUmodule modCTS;
-
-};
-
 typedef struct {
     float3 m[3];
 } float3x3;
@@ -79,27 +60,85 @@ typedef struct {
 	float4 m[4];
 } float4x4;
 
+struct DeviceReconstructionConstantsCommon
+{  
+  float4x4 DetectorMatrix;
+  float3x3 magAniso;
+  float3x3 magAnisoInv;  
+  float3 volumeBBoxRcp;
+  float3 volumeDim;
+  float3 volumeDimComplete;  
+  float3 voxelSize;  
+  float3 bBoxMin;
+  float3 bBoxMax;
+  float3 bBoxMinComplete;
+  float3 bBoxMaxComplete;
+  float3 detektor;
+  float3 uPitch;
+  float3 vPitch;
+  float3 projNorm;
+  float3 tGradient;
+  float  zShiftForPartialVolume; 
+  int    volumeDim_x_quarter;
+ };
+
+struct DeviceReconstructionConstantsCtf
+{
+  float cs;
+  float voltage;
+  float openingAngle;
+  float ampContrast;
+  float phaseContrast;
+  float pixelsize;
+  float pixelcount;
+  float maxFreq;
+  float freqStepSize;
+  // float lambda;
+  float applyScatteringProfile;
+  float applyEnvelopeFunction;
+};
+
+class KernelModuls
+{
+private:
+	bool compilerOutput;
+	bool infoOutput;
+
+public:
+	KernelModuls(Cuda::CudaContext* aCuCtx);
+	//CUmodule modFP;
+	//CUmodule modSlicer;
+	//CUmodule modVolTravLen;
+	//CUmodule modComp;
+	//CUmodule modWBP;
+	//CUmodule modBP;
+	//CUmodule modCTF;
+	//CUmodule modCTS;
+
+};
+
+
 class Reconstructor
 {
 private:
-	FPKernel fpKernel;
-	SlicerKernel slicerKernel;
-	VolTravLengthKernel volTravLenKernel;
-	CompKernel compKernel;
-	SubEKernel subEKernel;
-	WbpWeightingKernel wbp;
-	CropBorderKernel cropKernel;
-	BPKernel bpKernel;
-	ConvVolKernel convVolKernel;
-	ConvVol3DKernel convVol3DKernel;
-	CTFKernel ctf;
-	CopyToSquareKernel cts;
-	FourFilterKernel fourFilterKernel;
-	DoseWeightingKernel doseWeightingKernel;
-	ConjKernel conjKernel;
-	PCKernel pcKernel;
-	MaxShiftKernel maxShiftKernel;
-	DimBordersKernel dimBordersKernel;
+	//FPKernel fpKernel;
+	//SlicerKernel slicerKernel;
+	//VolTravLengthKernel volTravLenKernel;
+	//CompKernel compKernel;
+	//SubEKernel subEKernel;
+	//WbpWeightingKernel wbp;
+	//CropBorderKernel cropKernel;
+	//BPKernel bpKernel;
+	//ConvVolKernel convVolKernel;
+	//ConvVol3DKernel convVol3DKernel;
+	//CTFKernel ctf;
+	//CopyToSquareKernel cts;
+	//FourFilterKernel fourFilterKernel;
+	//DoseWeightingKernel doseWeightingKernel;
+	//ConjKernel conjKernel;
+	//PCKernel pcKernel;
+	//MaxShiftKernel maxShiftKernel;
+	//DimBordersKernel dimBordersKernel;
 #ifdef REFINE_MODE
 	MaxShiftWeightedKernel maxShiftWeightedKernel;
 	FindPeakKernel findPeakKernel;
@@ -247,17 +286,66 @@ public:
 	void CopyProjectionToSubVolumeProjection();
 	float2 GetDisplacement(bool MultiPeakDetection, float* CCValue = NULL);
     float2 GetDisplacementPC(bool MultiPeakDetection, float* CCValue = NULL);
+	// AS hipTextureObject_t texVol;
 	void rotVol(Cuda::CudaDeviceVariable& vol, float phi, float psi, float theta);
 	void setRotVolData(float* data);
 	float* GetCCMap();
 	float* GetCCMapMulti();
 #endif
 
-	void ConvertVolumeFP16(float* slice, Cuda::CudaSurfaceObject3D& surf, int z);
+	void ConvertVolumeFP16(Volume<unsigned short>* vol, float* slice, Cuda::CudaSurfaceObject3D& surf, int z);
 	void ConvertVolume3DFP16(float* volume, Cuda::CudaSurfaceObject3D& surf);
 	void MatrixVector3Mul(float4x4 M, float3* v);
     void MatrixVector3Mul(float3x3& M, float xIn, float yIn, float& xOut, float& yOut);
+
+	DeviceReconstructionConstantsCtf mRecParamCtf;
 };
+
+template<class TVol>
+DeviceReconstructionConstantsCommon GetReconstructionParameters( Volume<TVol>& vol, Projection& proj, int index, int subVol, Matrix<float>& m, Matrix<float>& mInv)
+{
+  //Set reconstruction parameters 
+  DeviceReconstructionConstantsCommon p;  
+  p.volumeBBoxRcp       = vol.GetSubVolumeBBoxRcp(subVol);
+  p.volumeDim           = vol.GetSubVolumeDimension(subVol);
+  p.volumeDim_x_quarter = (int)vol.GetDimension().x / 4;
+  p.volumeDimComplete   = vol.GetDimension();  
+  p.voxelSize           = vol.GetVoxelSize();    
+  proj.GetDetectorMatrix(index, (float*) &p.DetectorMatrix, 1);
+  p.bBoxMin         = vol.GetSubVolumeBBoxMin(subVol);
+  p.bBoxMax         = vol.GetSubVolumeBBoxMax(subVol);
+  p.bBoxMinComplete = vol.GetVolumeBBoxMin();
+  p.bBoxMaxComplete = vol.GetVolumeBBoxMax();
+  p.detektor = proj.GetPosition(index);
+  p.uPitch   = proj.GetPixelUPitch(index);
+  p.vPitch   = proj.GetPixelVPitch(index);
+  p.projNorm = proj.GetNormalVector(index);
+  p.zShiftForPartialVolume = 0;//vol.GetSubVolumeZShift(subVol);
+  //Magnification anisotropy  
+  p.magAniso = *(float3x3*) m.GetData();
+  p.magAnisoInv = *(float3x3*) mInv.GetData();
+
+  // ray direction == normal to the projection plane,  +-sign is not important
+  // t coordinate will be a coordinate along the ray 
+  const float3 &ray = p.projNorm;  
+
+  float3 tGradient; // == dt/dx dt/dy dt/dz
+  
+  if( fabs(ray.x)<1.e-4 ){
+    tGradient.x = (ray.x>=0) ?1.e4 : -1.e4;    
+  } else tGradient.x = 1.0 / (double) ray.x;
+  if( fabs(ray.y)<1.e-4 ){
+    tGradient.y = (ray.y>=0) ?1.e4 : -1.e4;
+  } else tGradient.y = 1.0 / (double) ray.y;
+  if( fabs(ray.z)<1.e-4 ){
+    tGradient.z = (ray.z>=0) ?1.e4 : -1.e4;
+  } else tGradient.z = 1.0 / (double) ray.z;
+
+  p.tGradient = tGradient;
+
+  return p;
+}
+
 
 #endif // !RECONSTRUCTOR_H
 

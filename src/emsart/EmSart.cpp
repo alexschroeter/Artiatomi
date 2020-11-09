@@ -768,7 +768,7 @@ int main(int argc, char* argv[])
 					float* volTemp_h = new float[aConfig.RecDimensions.x * aConfig.RecDimensions.y];
 					for (int zSlice = 0; zSlice < dim.z; zSlice++)
 					{
-						reconstructor.ConvertVolumeFP16(volTemp_h, surfObj, zSlice);
+						reconstructor.ConvertVolumeFP16(volFP16, volTemp_h, surfObj, zSlice);
 						mVol->write((char*)volTemp_h, dimI);
 						mVol->flush();
 					
@@ -826,7 +826,7 @@ int main(int argc, char* argv[])
 					float* volTemp_h = new float[aConfig.RecDimensions.x * aConfig.RecDimensions.y];
 					for (int zSlice = 0; zSlice < dim.z; zSlice++)
 					{
-						reconstructor.ConvertVolumeFP16(volTemp_h, surfObj, zSlice);
+						reconstructor.ConvertVolumeFP16(volFP16, volTemp_h, surfObj, zSlice);
 						mVol->write((char*)volTemp_h, dimI);
 						mVol->flush();
 					
